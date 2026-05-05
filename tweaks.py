@@ -1,244 +1,1034 @@
 """
-tweaks.py — Определения твиков и функции их применения.
+tweaks.py — Логика оптимизации Windows 11.
+Содержит функции для работы с реестром, питанием и визуальными эффектами.
 """
 
 import winreg
 import subprocess
 import struct
+import ctypes
+import re
+import platform
 
 # ── Константы GUID схем питания ───────────────────────────────────────────
 POWER_BALANCED      = "381b4222-f694-41f0-9685-ff5bb260df2e"
 POWER_HIGH          = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
 POWER_ULTIMATE      = "e9a42b02-d5df-448d-aa00-03f14749eb61"
 
+# Флаг для подавления окон командной строки
+CREATE_NO_WINDOW = 0x08000000
 
-# ── Описание 17 визуальных эффектов ───────────────────────────────────────
-# kind: "DWORD" | "SZ" | "MASK"
-# Для MASK: бит в UserPreferencesMask (HKCU\Control Panel\Desktop)
-# Для DWORD/SZ: прямая запись в реестр
 
+
+def run_cmd_bytes(command: list[str]) -> str:
+    """Специальная функция: получаем сырые байты, чтобы избежать проблем с кодировкой (CP866/UTF-8)."""
+    try:
+        result = subprocess.run(
+            command, 
+            capture_output=True, 
+            creationflags=CREATE_NO_WINDOW,
+            timeout=10
+        )
+        # Пытаемся cp866 (стандарт консоли RU), потом utf-8
+        try:
+            return result.stdout.decode('cp866', errors='ignore')
+        except Exception:
+            return result.stdout.decode('utf-8', errors='ignore')
+    except Exception:
+        return ""
+
+
+# ── Описание 17 визуальных эффектов Windows 11 ────────────────────────────
 VISUAL_EFFECTS: list[dict] = [
-    {"label": "Анимация на панели задач",                          "recommended": False,
+    {"label": "Анимированные элементы управления внутри окон",     "fx_key": "ControlAnimations",
      "kind": "DWORD", "hive": winreg.HKEY_CURRENT_USER,
-     "key": r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-     "name": "TaskbarAnimations",  "on": 1, "off": 0},
+     "key": r"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects\ControlAnimations",
+     "name": "DefaultValue",       "on": 1, "off": 0, "spi_action": 0x1043, "spi_type": "pv", "recommended": False},
 
-    {"label": "Анимация окон при свертывании и развертывании",     "recommended": False,
+    {"label": "Анимация окон при свертывании и развертывании",     "fx_key": "AnimateMinMax",
      "kind": "SZ",    "hive": winreg.HKEY_CURRENT_USER,
      "key": r"Control Panel\Desktop\WindowMetrics",
-     "name": "MinAnimate",         "on": "1", "off": "0"},
+     "name": "MinAnimate",         "on": "1", "off": "0", 
+     "spi_action": 0x0049, "spi_type": "struct_anim", "recommended": False},
 
-    {"label": "Анимированные элементы управления внутри окон",     "recommended": False,
-     "kind": "MASK",  "bit": 0x8000},
-
-    {"label": "Включение Peek",                                    "recommended": False,
+    {"label": "Анимация на панели задач",                          "fx_key": "TaskbarAnimations",
      "kind": "DWORD", "hive": winreg.HKEY_CURRENT_USER,
      "key": r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-     "name": "EnableAeroPeek",     "on": 1, "off": 0},
+     "name": "TaskbarAnimations",  "on": 1, "off": 0, "spi_action": None, "recommended": False},
 
-    {"label": "Вывод эскизов вместо значков",                      "recommended": True,
+    {"label": "Включение Peek",                                    "fx_key": "DWMAeroPeekEnabled",
      "kind": "DWORD", "hive": winreg.HKEY_CURRENT_USER,
      "key": r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-     "name": "IconsOnly",          "on": 0, "off": 1},  # 0=эскизы (включено)
+     "name": "EnableAeroPeek",     "on": 1, "off": 0, "spi_action": None,
+     "recommended": False,
+     "extra_keys": [
+         {"key": r"Software\Microsoft\Windows\DWM", "name": "EnableAeroPeek", "on": 1, "off": 0},
+         {"key": r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "name": "DisablePreviewDesktop", "on": 0, "off": 1}
+     ]},
 
-    {"label": "Гладкое прокручивание списков",                     "recommended": False,
-     "kind": "MASK",  "bit": 0x0001},
+    {"label": "Эффекты затухания или скольжения при обращении к меню", "fx_key": "MenuAnimation",
+     "kind": "MASK",  "bit": 0x0002, "spi_action": 0x1003, "spi_type": "pv", "recommended": False},
 
-    {"label": "Затухание меню после вызова команды",               "recommended": False,
-     "kind": "MASK",  "bit": 0x0200},
+    {"label": "Эффекты затухания или скольжения при появлении подсказок", "fx_key": "TooltipAnimation",
+     "kind": "MASK",  "bit": 0x1800, "spi_action": 0x1011, "spi_type": "pv", "recommended": False},
 
-    {"label": "Отбрасывание теней значками на рабочем столе",      "recommended": False,
+    {"label": "Затухание меню после вызова команды",               "fx_key": "SelectionFade",
+     "kind": "MASK",  "bit": 0x0400, "spi_action": 0x1013, "spi_type": "pv", "recommended": False},
+
+    {"label": "Сохранение вида эскизов панели задач",              "fx_key": "DWMSaveThumbnailEnabled",
+     "kind": "DWORD", "hive": winreg.HKEY_CURRENT_USER,
+     "key": r"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects\DWMSaveThumbnailEnabled",
+     "name": "DefaultValue",       "on": 1, "off": 0, "spi_action": None,
+     "recommended": False,
+     "extra_keys": [
+         {"key": r"Software\Microsoft\Windows\DWM", "name": "AlwaysHibernateThumbnails", "on": 1, "off": 0}
+     ]},
+
+    {"label": "Отображение теней, отбрасываемых окнами",           "fx_key": "Shadow",
+     "kind": "DWORD", "hive": winreg.HKEY_CURRENT_USER,
+     "key": r"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects\Shadow",
+     "name": "DefaultValue",       "on": 1, "off": 0, "spi_action": None, 
+     "bit": 0x00040000, "recommended": False},
+
+    {"label": "Отображение тени под указателем мыши",              "fx_key": "CursorShadow",
+     "kind": "MASK",  "bit": 0x2000, "spi_action": 0x101B, "spi_type": "pv", "recommended": False},
+
+    {"label": "Вывод эскизов вместо значков",                      "fx_key": "ThumbnailsOrIcon",
      "kind": "DWORD", "hive": winreg.HKEY_CURRENT_USER,
      "key": r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-     "name": "ListviewShadow",     "on": 1, "off": 0},
+     "name": "IconsOnly",          "on": 0, "off": 1, "spi_action": None, "recommended": True},
 
-    {"label": "Отображение прозрачного прямоугольника выделения",  "recommended": True,
+    {"label": "Отображение прозрачного прямоугольника выделения",  "fx_key": "ListviewAlphaSelect",
      "kind": "DWORD", "hive": winreg.HKEY_CURRENT_USER,
      "key": r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-     "name": "ListviewAlphaSelect","on": 1, "off": 0},
+     "name": "ListviewAlphaSelect","on": 1, "off": 0, "spi_action": None, "recommended": True},
 
-    {"label": "Отображение содержимого окна при перетаскивании",   "recommended": True,
+    {"label": "Отображение содержимого окна при перетаскивании",   "fx_key": "DragFullWindows",
      "kind": "SZ",    "hive": winreg.HKEY_CURRENT_USER,
      "key": r"Control Panel\Desktop",
-     "name": "DragFullWindows",    "on": "1", "off": "0"},
+     "name": "DragFullWindows",    "on": "1", "off": "0", "spi_action": 0x0025, "spi_type": "ui", "recommended": True},
 
-    {"label": "Отображение теней, отбрасываемых окнами",           "recommended": False,
-     "kind": "MASK",  "bit": 0x0020},
+    {"label": "Скольжение при раскрытии списков",                  "fx_key": "ComboBoxAnimation",
+     "kind": "MASK",  "bit": 0x0004, "spi_action": 0x1005, "spi_type": "pv", "recommended": False},
 
-    {"label": "Отображение тени под указателем мыши",              "recommended": False,
-     "kind": "MASK",  "bit": 0x0010},
-
-    {"label": "Сглаживание неровностей экранных шрифтов",          "recommended": True,
+    {"label": "Сглаживание неровностей экранных шрифтов",          "fx_key": "FontSmoothing",
      "kind": "SZ",    "hive": winreg.HKEY_CURRENT_USER,
      "key": r"Control Panel\Desktop",
-     "name": "FontSmoothing",      "on": "2", "off": "0"},
+     "name": "FontSmoothing",      "on": "2", "off": "0", "spi_action": 0x004B, "spi_type": "ui", "recommended": True},
 
-    {"label": "Скольжение при раскрытии списков",                  "recommended": False,
-     "kind": "MASK",  "bit": 0x0004},
+    {"label": "Гладкое прокручивание списков",                     "fx_key": "ListBoxSmoothScrolling",
+     "kind": "MASK",  "bit": 0x0008, "spi_action": 0x1007, "spi_type": "pv", "recommended": False},
 
-    {"label": "Сохранение вида эскизов панели задач",              "recommended": False,
+    {"label": "Отбрасывание теней значками на рабочем столе",      "fx_key": "ListviewShadow",
      "kind": "DWORD", "hive": winreg.HKEY_CURRENT_USER,
      "key": r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-     "name": "TaskbarAnimations",  "on": 1, "off": 0},
-
-    {"label": "Эффекты затухания/скольжения при обращении к меню", "recommended": False,
-     "kind": "MASK",  "bit": 0x0002},
-
-    {"label": "Эффекты затухания/скольжения при появлении подсказок", "recommended": False,
-     "kind": "MASK",  "bit": 0x0100},
+     "name": "ListviewShadow",     "on": 1, "off": 0, "spi_action": None, "recommended": False},
 ]
 
 
 # ── Вспомогательные функции реестра ───────────────────────────────────────
 
-def _read_mask() -> int:
-    """Читает UserPreferencesMask из реестра как int."""
+class ANIMATIONINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("iMinAnimate", ctypes.c_int)]
+
+def _read_mask() -> bytearray:
+    """Читает UserPreferencesMask из реестра как bytearray (8+ байт)."""
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop")
         data, _ = winreg.QueryValueEx(key, "UserPreferencesMask")
         winreg.CloseKey(key)
-        # data — bytes (REG_BINARY), берём первые 4 байта как little-endian uint32
-        return struct.unpack_from("<I", bytes(data))[0]
+        return bytearray(data)
     except Exception:
-        return 0x80031290  # default Windows value
+        # Стандартная маска (8 байт), если чтение не удалось
+        return bytearray(b"\x90\x12\x03\x80\x10\x00\x00\x00")
 
 
-def _write_mask(mask: int):
-    """Записывает UserPreferencesMask в реестр."""
+def _write_mask(mask: bytearray):
+    """Записывает UserPreferencesMask в реестр, сохраняя длину."""
     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop",
                          0, winreg.KEY_SET_VALUE)
-    # Сохраняем как 8 байт (полная длина маски)
-    data = struct.pack("<I", mask) + b"\x00\x00\x00\x00"
-    winreg.SetValueEx(key, "UserPreferencesMask", 0, winreg.REG_BINARY, data)
+    winreg.SetValueEx(key, "UserPreferencesMask", 0, winreg.REG_BINARY, bytes(mask))
     winreg.CloseKey(key)
+
+    # Установка режима "Custom" (3) в VisualFXSetting
+    try:
+        fx_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, 
+                                  r"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects")
+        winreg.SetValueEx(fx_key, "VisualFXSetting", 0, winreg.REG_DWORD, 3)
+        winreg.CloseKey(fx_key)
+    except Exception:
+        pass
+
+
+def _broadcast_setting_change():
+    """Рассылает сообщение WM_SETTINGCHANGE всем окнам для обновления Shell."""
+    HWND_BROADCAST = 0xFFFF
+    WM_SETTINGCHANGE = 0x001A
+    SMTO_ABORTIFHUNG = 0x0002
+    result = ctypes.c_ulong()
+    try:
+        # Уведомляем о смене окружения (влияет на Peek, DragFullWindows и др.)
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", 
+            SMTO_ABORTIFHUNG, 5000, ctypes.byref(result)
+        )
+        # Уведомляем о смене темы (влияет на тени окон)
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Themes", 
+            SMTO_ABORTIFHUNG, 5000, ctypes.byref(result)
+        )
+    except Exception:
+        pass
+
+
+def _refresh_system_visuals(enabled_indices: list[int]):
+    """Точечно уведомляет систему об изменениях через SystemParametersInfoW."""
+    SPIF_UPDATEINIFILE = 0x01
+    SPIF_SENDCHANGE = 0x02
+
+    # 1. Глобальный переключатель UI-эффектов (SPI_SETUIEFFECTS = 0x103F)
+    has_any_fx = len(enabled_indices) > 0
+    try:
+        ctypes.windll.user32.SystemParametersInfoW(0x103F, 0, ctypes.c_void_p(1 if has_any_fx else 0), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
+    except Exception:
+        pass
+
+    # 2. Индивидуальные SPI вызовы
+    for i, fx in enumerate(VISUAL_EFFECTS):
+        action = fx.get("spi_action")
+        if action is None:
+            continue
+        
+        is_on = i in enabled_indices
+        try:
+            stype = fx.get("spi_type", "pv")
+            if stype == "pv":
+                pv = ctypes.c_void_p(1 if is_on else 0)
+                ctypes.windll.user32.SystemParametersInfoW(action, 0, pv, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
+            elif stype == "ui":
+                ctypes.windll.user32.SystemParametersInfoW(action, 1 if is_on else 0, None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
+            elif stype == "struct_anim":
+                info = ANIMATIONINFO(cbSize=ctypes.sizeof(ANIMATIONINFO), iMinAnimate=1 if is_on else 0)
+                ctypes.windll.user32.SystemParametersInfoW(action, ctypes.sizeof(info), ctypes.byref(info), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
+        except Exception:
+            pass
+    
+    # 3. Финальная рассылка сообщения всем окнам
+    _broadcast_setting_change()
 
 
 def _set_reg(hive, key_path: str, name: str, value, kind: str):
     """Универсальная запись значения в реестр."""
     reg_type = winreg.REG_DWORD if kind == "DWORD" else winreg.REG_SZ
-    key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_SET_VALUE)
+    key = winreg.CreateKey(hive, key_path)
     winreg.SetValueEx(key, name, 0, reg_type, value)
     winreg.CloseKey(key)
+
+
+def _get_reg(hive, key_path: str, name: str):
+    """Безопасное чтение значения из реестра."""
+    try:
+        key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ)
+        val, _ = winreg.QueryValueEx(key, name)
+        winreg.CloseKey(key)
+        return val
+    except Exception:
+        return None
 
 
 # ── Применение твиков ──────────────────────────────────────────────────────
 
 def apply_visual_effects(enabled_indices: list[int]):
-    """
-    Применяет визуальные эффекты.
-    enabled_indices — список индексов включённых эффектов из VISUAL_EFFECTS.
-    """
+    """Применяет визуальные эффекты и уведомляет систему."""
     mask = _read_mask()
+    fx_base = r"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
     for i, fx in enumerate(VISUAL_EFFECTS):
         is_on = i in enabled_indices
-        if fx["kind"] == "MASK":
-            if is_on:
-                mask |= fx["bit"]
-            else:
-                mask &= ~fx["bit"]
-        else:
+        
+        # 1. Записываем в основной ключ (DWORD/SZ)
+        if fx["kind"] != "MASK":
             val = fx["on"] if is_on else fx["off"]
             _set_reg(fx["hive"], fx["key"], fx["name"], val, fx["kind"])
+        
+        # 2. Обработка битовой маски (если есть bit)
+        if "bit" in fx and fx["bit"] is not None:
+            bit_val = fx["bit"]
+            for b_idx in range(4):
+                byte_bit = (bit_val >> (8 * b_idx)) & 0xFF
+                if byte_bit == 0: continue
+                if is_on:
+                    mask[b_idx] |= byte_bit
+                else:
+                    mask[b_idx] &= ~byte_bit
+        
+        # 3. Записываем доп. ключи (например DWM или инвертированные)
+        if fx.get("extra_keys"):
+            for ek in fx["extra_keys"]:
+                try:
+                    val = ek["on"] if is_on else ek["off"]
+                    # По умолчанию HKCU
+                    _set_reg(winreg.HKEY_CURRENT_USER, ek["key"], ek["name"], val, "DWORD")
+                except Exception:
+                    pass
+
+        # 4. Записываем в дублирующий ключ VisualEffects (для синхронизации UI)
+        if fx.get("fx_key"):
+            try:
+                path = f"{fx_base}\\{fx['fx_key']}"
+                _set_reg(winreg.HKEY_CURRENT_USER, path, "Applied", 1 if is_on else 0, "DWORD")
+            except Exception:
+                pass
+    
+    # 3. Пишем маску и VisualFXSetting = 3
     _write_mask(mask)
+    
+    # 4. Точечно уведомляем систему через API и рассылаем сообщение
+    _refresh_system_visuals(enabled_indices)
 
 
 def get_visual_effects_state() -> list[int]:
-    """Возвращает список индексов включённых эффектов."""
+    """Возвращает список индексов включённых эффектов с учетом VisualFXSetting."""
+    # Проверяем глобальный режим
+    try:
+        fx_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects")
+        fx_setting, _ = winreg.QueryValueEx(fx_key, "VisualFXSetting")
+        winreg.CloseKey(fx_key)
+        
+        if fx_setting == 1: # Best appearance
+            return list(range(len(VISUAL_EFFECTS)))
+        if fx_setting == 2: # Best performance
+            return []
+    except Exception:
+        pass
+
+    # Если Custom (3) или не задано, читаем по битам/ключам
     mask = _read_mask()
+    fx_base = r"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
     enabled = []
+    
     for i, fx in enumerate(VISUAL_EFFECTS):
-        if fx["kind"] == "MASK":
-            if mask & fx["bit"]:
-                enabled.append(i)
-        else:
+        # 1. Сначала пробуем прочитать из VisualEffects (самый точный способ для синхронизации)
+        if fx.get("fx_key"):
+            try:
+                path = f"{fx_base}\\{fx['fx_key']}"
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_READ)
+                val, _ = winreg.QueryValueEx(key, "Applied")
+                winreg.CloseKey(key)
+                if val == 1:
+                    enabled.append(i)
+                continue
+            except Exception:
+                pass
+
+        # 2. Иначе читаем из маски ИЛИ стандартного ключа
+        is_fx_on = False
+        
+        # Проверка по маске
+        if "bit" in fx and fx["bit"] is not None:
+            bit_val = fx["bit"]
+            bit_match = True
+            found_any = False
+            for b_idx in range(4):
+                byte_bit = (bit_val >> (8 * b_idx)) & 0xFF
+                if byte_bit == 0: continue
+                found_any = True
+                if not (mask[b_idx] & byte_bit):
+                    bit_match = False
+                    break
+            if found_any and bit_match:
+                is_fx_on = True
+
+        # Проверка по ключу (если маска не сработала или её нет)
+        if not is_fx_on and fx["kind"] != "MASK":
             try:
                 key = winreg.OpenKey(fx["hive"], fx["key"], 0, winreg.KEY_READ)
                 val, _ = winreg.QueryValueEx(key, fx["name"])
                 winreg.CloseKey(key)
-                if val == fx["on"]:
-                    enabled.append(i)
+                if str(val) == str(fx["on"]):
+                    is_fx_on = True
             except Exception:
                 pass
+        
+        if is_fx_on:
+            enabled.append(i)
     return enabled
 
 
-def apply_power_plan(is_laptop: bool, force_performance: bool = False):
-    """Устанавливает схему питания."""
-    if force_performance or not is_laptop:
-        guid = POWER_ULTIMATE
+def get_current_power_scheme_guid() -> str:
+    """Возвращает GUID текущей схемы питания."""
+    output = run_cmd_bytes(["powercfg", "/getactivescheme"])
+    # Ищем GUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    match = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", output, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    return ""
+
+
+def is_recommended_power_plan_active(is_laptop: bool) -> bool:
+    """Проверяет, активирована ли рекомендованная схема питания (по GUID или имени)."""
+    output = run_cmd_bytes(["powercfg", "/getactivescheme"])
+    output_lower = output.lower()
+
+    if is_laptop:
+        # Для ноутбука ожидаем Balanced
+        if POWER_BALANCED in output_lower:
+            return True
+        if "balanced" in output_lower or "сбалансированная" in output_lower:
+            return True
     else:
+        # Для ПК ожидаем Ultimate или High
+        if POWER_ULTIMATE in output_lower or POWER_HIGH in output_lower:
+            return True
+        # Проверяем по имени (поддерживаем дубликаты и локализованные названия)
+        keywords = ["ultimate", "максимальная", "high performance", "высокая производительность"]
+        if any(kw in output_lower for kw in keywords):
+            return True
+    
+    return False
+
+
+def apply_power_plan(is_laptop: bool, force_performance: bool = False):
+    """Устанавливает схему питания с защитой от дубликатов и без мелькания окон."""
+    if force_performance or not is_laptop:
+        # 1. Ищем существующую "Максимальную производительность" (Ultimate Performance)
+        output = run_cmd_bytes(["powercfg", "/list"])
+        target_guid = None
+
+        for line in output.splitlines():
+            line_lower = line.lower()
+            # Проверяем ключевые слова (максимальная или ultimate)
+            if "ultimate" in line_lower or "максимальная" in line_lower:
+                match = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", line, re.IGNORECASE)
+                if match:
+                    target_guid = match.group(1)
+                    break
+        
+        if target_guid:
+            guid = target_guid
+        else:
+            # 2. Если нет — создаем и сразу вытягиваем её новый GUID из ответа
+            output_dup = run_cmd_bytes(["powercfg", "-duplicatescheme", POWER_ULTIMATE])
+            match_new = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", output_dup, re.IGNORECASE)
+            if match_new:
+                guid = match_new.group(1)
+            else:
+                # Fallback на Высокую производительность
+                guid = POWER_HIGH
+    else:
+        # Для ноутбука: Сбалансированная
         guid = POWER_BALANCED
-    # Пробуем Ultimate, при ошибке — High Performance
-    result = subprocess.run(
-        ["powercfg", "/setactive", guid],
-        capture_output=True, timeout=10
-    )
-    if result.returncode != 0 and guid == POWER_ULTIMATE:
-        subprocess.run(["powercfg", "/setactive", POWER_HIGH],
-                       capture_output=True, timeout=10)
+    
+    # Активируем выбранную схему
+    if guid:
+        subprocess.run(["powercfg", "/setactive", guid], capture_output=True, 
+                       creationflags=CREATE_NO_WINDOW, timeout=10)
 
 
-def apply_copilot_disable():
-    """Скрывает кнопку Copilot с панели задач."""
+def set_power_scheme(guid: str):
+    """Активирует схему питания по GUID."""
+    if not guid:
+        return
+    subprocess.run(["powercfg", "/setactive", guid], capture_output=True, 
+                   creationflags=CREATE_NO_WINDOW, timeout=10)
+
+
+
+def apply_copilot_disable(disable: bool = True):
+    """Полностью отключает или включает Copilot (кнопка, функционал и автозапуск)."""
+    # 1. Визуальная часть панели задач
+    adv_key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    _set_reg(winreg.HKEY_CURRENT_USER, adv_key, "ShowCopilotButton", 0 if disable else 1, "DWORD")
+    _set_reg(winreg.HKEY_CURRENT_USER, adv_key, "AllowCopilot", 0 if disable else 1, "DWORD")
+    _set_reg(winreg.HKEY_CURRENT_USER, adv_key, "ConfigureCopilot", 0 if disable else 1, "DWORD")
+
+    # 2. Политики (пользователь + система)
     _set_reg(winreg.HKEY_CURRENT_USER,
-             r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-             "ShowCopilotButton", 0, "DWORD")
+             r"Software\Policies\Microsoft\Windows\WindowsCopilot",
+             "TurnOffWindowsCopilot", 1 if disable else 0, "DWORD")
+    _set_reg(winreg.HKEY_LOCAL_MACHINE,
+             r"SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot",
+             "TurnOffWindowsCopilot", 1 if disable else 0, "DWORD")
+    _set_reg(winreg.HKEY_LOCAL_MACHINE,
+             r"SOFTWARE\Policies\Microsoft\Windows\Explorer",
+             "DisableCopilot", 1 if disable else 0, "DWORD")
+
+    # 3. Автозапуск и живые процессы
+    prevent_copilot_autostart(disable)
+    if disable:
+        kill_copilot_processes()
 
 
 def is_copilot_disabled() -> bool:
-    """Проверяет, скрыт ли Copilot."""
+    """Проверяет, полностью ли отключен Copilot (кнопка и функционал)."""
+    try:
+        adv_key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+
+        # Проверяем основную кнопку и визуальные ограничения
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, adv_key, 0, winreg.KEY_READ)
+            show_button, _ = winreg.QueryValueEx(key, "ShowCopilotButton")
+            allow_copilot, _ = winreg.QueryValueEx(key, "AllowCopilot")
+            configure_copilot, _ = winreg.QueryValueEx(key, "ConfigureCopilot")
+            winreg.CloseKey(key)
+            button_hidden = show_button == 0
+            allow_blocked = allow_copilot == 0
+            configure_blocked = configure_copilot == 0
+        except Exception:
+            button_hidden = False
+            allow_blocked = False
+            configure_blocked = False
+        
+        # Проверяем политику для текущего пользователя
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Policies\Microsoft\Windows\WindowsCopilot",
+                                 0, winreg.KEY_READ)
+            turn_off, _ = winreg.QueryValueEx(key, "TurnOffWindowsCopilot")
+            winreg.CloseKey(key)
+            policy_user = turn_off == 1
+        except Exception:
+            policy_user = False
+        
+        # Проверяем политику для всех пользователей
+        try:
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                 r"SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot",
+                                 0, winreg.KEY_READ)
+            turn_off, _ = winreg.QueryValueEx(key, "TurnOffWindowsCopilot")
+            winreg.CloseKey(key)
+            policy_system = turn_off == 1
+        except Exception:
+            policy_system = False
+
+        # Политика Explorer (скрывает и отключает Copilot системно)
+        try:
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                 r"SOFTWARE\Policies\Microsoft\Windows\Explorer",
+                                 0, winreg.KEY_READ)
+            disable_copilot, _ = winreg.QueryValueEx(key, "DisableCopilot")
+            winreg.CloseKey(key)
+            explorer_policy = disable_copilot == 1
+        except Exception:
+            explorer_policy = False
+        
+        # Copilot считается отключенным, если кнопка скрыта И активна хотя бы одна блокировка функционала
+        return button_hidden and (
+            policy_user or policy_system or explorer_policy or (allow_blocked and configure_blocked)
+        )
+        
+    except Exception:
+        return False
+
+
+
+
+def kill_copilot_processes():
+    """Завершает все процессы связанные с Copilot."""
+    try:
+        import psutil
+        # Ищем процессы Copilot
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                proc_name = proc.info['name'].lower()
+                if 'copilot' in proc_name:
+                    proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception:
+        pass
+
+
+def prevent_copilot_autostart(prevent: bool = True):
+    """Предотвращает или разрешает автозапуск Copilot через реестр."""
+    if prevent:
+        # Блокируем автозапуск через Run ключи
+        run_keys = [
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
+        ]
+        
+        for root, key_path in run_keys:
+            try:
+                key = winreg.OpenKey(root, key_path, 0, winreg.KEY_READ)
+                # Получаем все значения в ключе
+                values = {}
+                try:
+                    i = 0
+                    while True:
+                        name, value, reg_type = winreg.EnumValue(key, i)
+                        values[name] = value
+                        i += 1
+                except WindowsError:
+                    pass
+                winreg.CloseKey(key)
+                
+                # Ищем и удаляем Copilot записи
+                for value_name in values:
+                    if any(copilot_name in value_name.lower() for copilot_name in 
+                          ['copilot', 'microsoft.copilot', 'ms365copilot']):
+                        try:
+                            del_key = winreg.OpenKey(root, key_path, 0, winreg.KEY_SET_VALUE)
+                            winreg.DeleteValue(del_key, value_name)
+                            winreg.CloseKey(del_key)
+                        except Exception:
+                            pass
+                            
+            except Exception:
+                pass
+        
+        # Блокируем автозапуск через политики (если есть права)
+        try:
+            _set_reg(winreg.HKEY_CURRENT_USER,
+                     r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer",
+                     "DisableCopilotStartup", 1 if prevent else 0, "DWORD")
+        except PermissionError:
+            pass  # Игнорируем ошибку прав доступа
+        
+        # Очищаем папку автозагрузки
+        cleanup_copilot_startup_folder()
+        
+    else:
+        # Разрешаем автозапуск
+        try:
+            _set_reg(winreg.HKEY_CURRENT_USER,
+                     r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer",
+                     "DisableCopilotStartup", 0, "DWORD")
+        except PermissionError:
+            pass  # Игнорируем ошибку прав доступа
+
+
+def cleanup_copilot_startup_folder():
+    """Очищает папки автозагрузки от Copilot ярлыков."""
+    import os
+    
+    startup_folders = [
+        os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"),
+        os.path.expandvars(r"%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs\Startup"),
+    ]
+    
+    for folder in startup_folders:
+        try:
+            if os.path.exists(folder):
+                for file_name in os.listdir(folder):
+                    file_path = os.path.join(folder, file_name)
+                    if os.path.isfile(file_path):
+                        # Проверяем имя файла на наличие Copilot
+                        if any(copilot_name in file_name.lower() for copilot_name in 
+                              ['copilot', 'microsoft.copilot', 'ms365copilot']):
+                            try:
+                                os.remove(file_path)
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+
+def test_copilot_functionality() -> bool:
+    """Проверяет функциональную доступность Copilot."""
+    try:
+        # Проверяем URI протоколы и их команды
+        def is_protocol_working(protocol):
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, protocol, 0, winreg.KEY_READ)
+                # Проверяем команду
+                try:
+                    cmd_key = winreg.OpenKey(key, r'shell\open\command', 0, winreg.KEY_READ)
+                    cmd, _ = winreg.QueryValueEx(cmd_key, '')
+                    winreg.CloseKey(cmd_key)
+                    winreg.CloseKey(key)
+                    # Команда работает если она не пустая и не заблокирована
+                    return cmd and not cmd.startswith('rem Blocked')
+                except Exception:
+                    winreg.CloseKey(key)
+                    return False
+            except Exception:
+                return False
+        
+        ms_copilot_working = is_protocol_working("ms-copilot")
+        edge_copilot_working = is_protocol_working("ms-edge-copilot")
+        
+        # Проверяем наличие процессов
+        import psutil
+        copilot_processes = any('copilot' in p.info['name'].lower() 
+                              for p in psutil.process_iter(['pid', 'name']))
+        
+        # Copilot функционально доступен если:
+        # - URI протоколы работают ИЛИ
+        # - Процессы Copilot запущены
+        return (ms_copilot_working or edge_copilot_working or copilot_processes)
+        
+    except Exception:
+        return False
+
+
+def get_game_mode_state() -> bool:
+    """Возвращает текущее состояние Game Mode."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                           r"Software\Microsoft\GameBar", 
+                           0, winreg.KEY_READ)
+        val1, _ = winreg.QueryValueEx(key, "AllowAutoGameMode")
+        val2, _ = winreg.QueryValueEx(key, "AutoGameModeEnabled")
+        winreg.CloseKey(key)
+        return val1 == 1 and val2 == 1
+    except Exception:
+        return False
+
+
+def apply_game_mode(enable: bool = True):
+    """Включает или выключает Game Mode."""
+    value = 1 if enable else 0
+    _set_reg(winreg.HKEY_CURRENT_USER,
+             r"Software\Microsoft\GameBar",
+             "AllowAutoGameMode", value, "DWORD")
+    _set_reg(winreg.HKEY_CURRENT_USER,
+             r"Software\Microsoft\GameBar",
+             "AutoGameModeEnabled", value, "DWORD")
+    # Уведомляем систему об изменениях
+    _broadcast_setting_change()
+
+
+def get_m365_copilot_status_details() -> dict:
+    """Возвращает детальную информацию о статусе блокировки M365 Copilot."""
+    details = {
+        "policy_blocked": False,
+        "policy_value": None,
+        "explorer_blocked": False,
+        "explorer_value": None,
+        "visual_blocked": False,
+        "show_button": None,
+        "allow_copilot": None,
+        "configure_copilot": None,
+        "uri_protocols_blocked": False,
+        "functional_available": False,
+        "overall_blocked": False
+    }
+    
+    try:
+        # Проверяем основные политики
+        try:
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                 r"SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot",
+                                 0, winreg.KEY_READ)
+            turn_off, _ = winreg.QueryValueEx(key, "TurnOffWindowsCopilot")
+            winreg.CloseKey(key)
+            details["policy_value"] = turn_off
+            details["policy_blocked"] = turn_off == 1
+        except Exception as e:
+            details["policy_value"] = f"Error: {e}"
+        
+        try:
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                 r"SOFTWARE\Policies\Microsoft\Windows\Explorer",
+                                 0, winreg.KEY_READ)
+            disable_copilot, _ = winreg.QueryValueEx(key, "DisableCopilot")
+            winreg.CloseKey(key)
+            details["explorer_value"] = disable_copilot
+            details["explorer_blocked"] = disable_copilot == 1
+        except Exception as e:
+            details["explorer_value"] = f"Error: {e}"
+        
+        # Проверяем визуальные настройки
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                                 0, winreg.KEY_READ)
+            show_button, _ = winreg.QueryValueEx(key, "ShowCopilotButton")
+            allow_copilot, _ = winreg.QueryValueEx(key, "AllowCopilot")
+            configure_copilot, _ = winreg.QueryValueEx(key, "ConfigureCopilot")
+            winreg.CloseKey(key)
+            
+            details["show_button"] = show_button
+            details["allow_copilot"] = allow_copilot
+            details["configure_copilot"] = configure_copilot
+            details["visual_blocked"] = show_button == 0 and allow_copilot == 0 and configure_copilot == 0
+        except Exception as e:
+            details["show_button"] = f"Error: {e}"
+            details["allow_copilot"] = f"Error: {e}"
+            details["configure_copilot"] = f"Error: {e}"
+        
+        # Проверяем URI протоколы (функционально заблокированы ли они)
+        def is_protocol_functionally_blocked(protocol):
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, protocol, 0, winreg.KEY_READ)
+                try:
+                    cmd_key = winreg.OpenKey(key, r'shell\open\command', 0, winreg.KEY_READ)
+                    cmd, _ = winreg.QueryValueEx(cmd_key, '')
+                    winreg.CloseKey(cmd_key)
+                    winreg.CloseKey(key)
+                    # Протокол заблокирован если команда пустая или начинается с rem Blocked
+                    return not cmd or cmd.startswith('rem Blocked')
+                except Exception:
+                    winreg.CloseKey(key)
+                    return True  # Нет команды = заблокирован
+            except Exception:
+                return True  # Нет протокола = заблокирован
+        
+        ms_copilot_blocked = is_protocol_functionally_blocked("ms-copilot")
+        edge_copilot_blocked = is_protocol_functionally_blocked("ms-edge-copilot")
+        
+        details["uri_protocols_blocked"] = ms_copilot_blocked and edge_copilot_blocked
+        
+        # Проверяем функциональную доступность
+        details["functional_available"] = test_copilot_functionality()
+        
+        # Общий статус - заблокирован только если:
+        # 1. Все реестровые настройки применены И
+        # 2. URI протоколы удалены И  
+        # 3. Функционально недоступен
+        registry_blocked = (details["policy_blocked"] and 
+                           details["explorer_blocked"] and 
+                           details["visual_blocked"])
+        
+        details["overall_blocked"] = (registry_blocked and 
+                                     details["uri_protocols_blocked"] and 
+                                     not details["functional_available"])
+        
+    except Exception as e:
+        details["error"] = str(e)
+    
+    return details
+
+
+def is_m365_copilot_blocked() -> bool:
+    """Проверяет, заблокирован ли Microsoft 365 Copilot."""
+    details = get_m365_copilot_status_details()
+    return details.get("overall_blocked", False)
+
+
+def apply_explorer_settings(open_to_this_pc: bool, recycle_in_nav: bool, 
+                            hide_recycle_desktop: bool, enable_end_task: bool):
+    """Применяет настройки Проводника."""
+    print(f"[DEBUG] apply_explorer_settings: recycle_in_nav={recycle_in_nav}, enable_end_task={enable_end_task}")
+    adv_key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    _set_reg(winreg.HKEY_CURRENT_USER, adv_key, "LaunchTo", 1 if open_to_this_pc else 2, "DWORD")
+
+    clsid_root = r"Software\Classes\CLSID\{645FF040-5081-101B-9F08-00AA002F954E}"
+    # Windows 11: System.IsPinnedToNameSpaceTree в корне CLSID
+    key_root = winreg.CreateKey(winreg.HKEY_CURRENT_USER, clsid_root)
+    winreg.SetValueEx(key_root, "System.IsPinnedToNameSpaceTree", 0, winreg.REG_DWORD, 1 if recycle_in_nav else 0)
+    winreg.CloseKey(key_root)
+    print(f"[DEBUG] Wrote System.IsPinnedToNameSpaceTree={1 if recycle_in_nav else 0} to CLSID root")
+
+    # Attributes оставляем в ShellFolder для совместимости
+    shell_folder = clsid_root + r"\ShellFolder"
+    key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, shell_folder)
+    # 0xF0400174 – отображать; 0x40010020 – скрывать из панели навигации
+    attr_value = 0xF0400174 if recycle_in_nav else 0x40010020
+    winreg.SetValueEx(key, "Attributes", 0, winreg.REG_DWORD, attr_value)
+    winreg.CloseKey(key)
+    print(f"[DEBUG] Wrote Attributes={hex(attr_value)} to ShellFolder")
+
+    hide_key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"
+    rb_guid = "{645FF040-5081-101B-9F08-00AA002F954E}"
+    hide_key_handle = winreg.CreateKey(winreg.HKEY_CURRENT_USER, hide_key)
+    winreg.SetValueEx(hide_key_handle, rb_guid, 0, winreg.REG_DWORD, 1 if hide_recycle_desktop else 0)
+    winreg.CloseKey(hide_key_handle)
+
+    taskbar_dev_key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings"
+    _set_reg(winreg.HKEY_CURRENT_USER, taskbar_dev_key, "TaskbarEndTask", 1 if enable_end_task else 0, "DWORD")
+    print(f"[DEBUG] Wrote TaskbarEndTask={1 if enable_end_task else 0} to TaskbarDeveloperSettings")
+
+
+def is_end_task_supported() -> bool:
+    """Проверяет, поддерживает ли текущая сборка Windows функцию «Завершить задачу» (TaskbarEndTask).
+    Доступна начиная с Windows 11 22H2 Moment 4 (Build 22621) и 23H2 (Build 22631)."""
+    try:
+        # platform.win32_ver()[1] возвращает строку вида "10.0.22631"
+        ver_str = platform.win32_ver()[1]
+        if not ver_str:
+            return False
+        build = int(ver_str.split('.')[-1])
+        return build >= 22621
+    except Exception:
+        return False
+
+
+def is_end_task_enabled() -> bool:
+    """Проверяет функцию завершения задачи."""
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                             r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                             r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings",
                              0, winreg.KEY_READ)
-        val, _ = winreg.QueryValueEx(key, "ShowCopilotButton")
+        val, _ = winreg.QueryValueEx(key, "TaskbarEndTask")
+        winreg.CloseKey(key)
+        result = val == 1
+        print(f"[DEBUG] is_end_task_enabled: val={val}, result={result}")
+        return result
+    except Exception as e:
+        print(f"[DEBUG] is_end_task_enabled: key not found ({e})")
+        return False
+
+
+def is_launch_to_this_pc() -> bool:
+    """Возвращает True, если Проводник открывается на «Этот компьютер» (LaunchTo = 1)."""
+    val = _get_reg(winreg.HKEY_CURRENT_USER,
+                   r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                   "LaunchTo")
+    return val == 1
+
+
+def is_recycle_bin_in_nav() -> bool:
+    """Проверяет наличие Корзины в боковой панели Проводника (Windows 11+)."""
+    clsid_root = r"Software\Classes\CLSID\{645FF040-5081-101B-9F08-00AA002F954E}"
+    # Windows 11: System.IsPinnedToNameSpaceTree лежит в корне CLSID
+    pinned = _get_reg(winreg.HKEY_CURRENT_USER, clsid_root, "System.IsPinnedToNameSpaceTree")
+    print(f"[DEBUG] is_recycle_bin_in_nav: CLSID root pinned={pinned}")
+    if pinned is not None:
+        return pinned == 1
+
+    # Fallback: старые версии / другие конфигурации — читаем Attributes из ShellFolder
+    shell_folder = clsid_root + r"\ShellFolder"
+    val = _get_reg(winreg.HKEY_CURRENT_USER, shell_folder, "Attributes")
+    print(f"[DEBUG] is_recycle_bin_in_nav: ShellFolder Attributes={val}")
+    if val is None:
+        return False
+    return val == 0xF0400174
+
+
+def is_recycle_bin_hidden_on_desktop() -> bool:
+    """Проверяет, скрыта ли Корзина с рабочего стола."""
+    val = _get_reg(winreg.HKEY_CURRENT_USER,
+                   r"Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel",
+                   "{645FF040-5081-101B-9F08-00AA002F954E}")
+    return val == 1
+
+
+def apply_sleep_timeouts(disable: bool):
+    """Отключает сон и выключение экрана."""
+    timeout = 0 if disable else 30
+    # Настройки для 'Никогда' (0) или стандартные (30 мин для AC, меньше для DC)
+    cmds = [
+        ["powercfg", "/x", "-monitor-timeout-ac", str(timeout)],
+        ["powercfg", "/x", "-standby-timeout-ac", str(timeout)],
+        ["powercfg", "/x", "-hibernate-timeout-ac", str(timeout)],
+        ["powercfg", "/x", "-disk-timeout-ac", str(timeout)],
+        
+        ["powercfg", "/x", "-monitor-timeout-dc", str(timeout if disable else 10)],
+        ["powercfg", "/x", "-standby-timeout-dc", str(timeout if disable else 15)],
+        ["powercfg", "/x", "-hibernate-timeout-dc", str(timeout if disable else 20)],
+        ["powercfg", "/x", "-disk-timeout-dc", str(timeout if disable else 10)]
+    ]
+    for cmd in cmds:
+        subprocess.run(cmd, capture_output=True, creationflags=CREATE_NO_WINDOW)
+
+
+def get_sleep_disabled_state() -> bool:
+    """Проверяет, установлен ли режим 'Никогда' для сна и монитора (AC/DC)."""
+    # Проверяем основные параметры: сон (STANDBYIDLE), монитор (VIDEOIDLE), гибернация (HIBERNATEIDLE)
+    queries = [
+        ["powercfg", "/q", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"],
+        ["powercfg", "/q", "SCHEME_CURRENT", "SUB_VIDEO", "VIDEOIDLE"],
+        ["powercfg", "/q", "SCHEME_CURRENT", "SUB_SLEEP", "HIBERNATEIDLE"]
+    ]
+    
+    for cmd in queries:
+        output = run_cmd_bytes(cmd)
+        if not output:
+            continue
+            
+        # Ищем индексы текущих настроек (Current Setting Index / Текущий индекс)
+        # В выводе powercfg /q для конкретного параметра последние два 0x... — это AC и DC индексы.
+        matches = re.findall(r":\s+(0x[0-9a-f]+)", output, re.IGNORECASE)
+        
+        # Если параметров меньше 2, значит что-то пошло не так
+        if len(matches) < 2:
+            continue
+            
+        # Нас интересуют только последние два значения (AC и DC текущие индексы)
+        current_indices = matches[-2:]
+        for m in current_indices:
+            try:
+                if int(m, 16) != 0:
+                    return False
+            except ValueError:
+                continue
+                
+    return True
+
+
+def apply_dark_mode(enabled: bool):
+    """Включает или выключает темную тему для системы и приложений."""
+    path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+    val = 0 if enabled else 1 # AppsUseLightTheme: 0 = Dark, 1 = Light
+    try:
+        _set_reg(winreg.HKEY_CURRENT_USER, path, "AppsUseLightTheme", val, "DWORD")
+        _set_reg(winreg.HKEY_CURRENT_USER, path, "SystemUsesLightTheme", val, "DWORD")
+        _broadcast_setting_change()
+    except Exception:
+        pass
+
+
+def restart_pc():
+    """Перезагружает ПК."""
+    subprocess.run(["shutdown", "/r", "/t", "10"], 
+                   capture_output=True, creationflags=CREATE_NO_WINDOW)
+
+
+def get_dark_mode_state() -> bool:
+    """Проверяет, включена ли темная тема."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                             r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", 
+                             0, winreg.KEY_READ)
+        val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
         winreg.CloseKey(key)
         return val == 0
     except Exception:
         return False
 
 
-def apply_explorer_settings(open_to_this_pc: bool, recycle_in_nav: bool, hide_recycle_desktop: bool):
-    """Применяет настройки Проводника."""
-    adv_key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+def restart_explorer():
+    """Перезапускает explorer.exe."""
+    print("[DEBUG] restart_explorer: killing explorer.exe...")
+    result = subprocess.run(["taskkill", "/f", "/im", "explorer.exe"], 
+                   capture_output=True, creationflags=CREATE_NO_WINDOW)
+    print(f"[DEBUG] restart_explorer: taskkill stdout={result.stdout}, stderr={result.stderr}")
+    import time
+    time.sleep(1)  # Даём процессу explorer.exe завершиться
+    print("[DEBUG] restart_explorer: starting explorer.exe...")
+    subprocess.Popen(["explorer.exe"])  # Без CREATE_NO_WINDOW — explorer нужен как shell
+    print("[DEBUG] restart_explorer: done")
 
-    # Открывать «Этот компьютер»: LaunchTo=1
-    if open_to_this_pc:
-        _set_reg(winreg.HKEY_CURRENT_USER, adv_key, "LaunchTo", 1, "DWORD")
 
-    # Корзина в боковой панели (через ShellFolder Attributes)
-    if recycle_in_nav:
-        try:
-            rb_clsid = r"Software\Classes\CLSID\{645FF040-5081-101B-9F08-00AA002F954E}\ShellFolder"
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, rb_clsid,
-                                 0, winreg.KEY_SET_VALUE | winreg.KEY_CREATE_SUB_KEY)
-            winreg.SetValueEx(key, "Attributes", 0, winreg.REG_DWORD, 0xF0400174)
-            winreg.CloseKey(key)
-        except Exception:
-            pass
+def restart_pc():
+    """Перезагружает ПК."""
+    subprocess.run(["shutdown", "/r", "/t", "10"], 
+                   capture_output=True, creationflags=CREATE_NO_WINDOW)
 
-    # Скрыть/показать корзину на рабочем столе
+
+def apply_wifi_adapter(enable: bool):
+    """Включает или отключает Wi-Fi адаптер."""
     try:
-        hide_key = (r"Software\Microsoft\Windows\CurrentVersion\Explorer"
-                    r"\HideDesktopIcons\NewStartPanel")
-        rb_guid = "{645FF040-5081-101B-9F08-00AA002F954E}"
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, hide_key,
-                             0, winreg.KEY_SET_VALUE | winreg.KEY_CREATE_SUB_KEY)
-        winreg.SetValueEx(key, rb_guid, 0, winreg.REG_DWORD, 1 if hide_recycle_desktop else 0)
-        winreg.CloseKey(key)
+        if enable:
+            # Включаем Wi-Fi адаптер
+            subprocess.run(["netsh", "interface", "set", "interface", "Wi-Fi", "enabled"], 
+                          capture_output=True, creationflags=CREATE_NO_WINDOW)
+        else:
+            # Отключаем Wi-Fi адаптер
+            subprocess.run(["netsh", "interface", "set", "interface", "Wi-Fi", "disabled"], 
+                          capture_output=True, creationflags=CREATE_NO_WINDOW)
     except Exception:
         pass
 
 
-def restart_explorer():
-    """Перезапускает explorer.exe."""
-    subprocess.run(["taskkill", "/f", "/im", "explorer.exe"],
-                   capture_output=True)
-    subprocess.Popen(["explorer.exe"])
-
-
-def restart_pc():
-    """Перезагружает ПК через shutdown."""
-    subprocess.run(["shutdown", "/r", "/t", "10",
-                    "/c", "Win11 Optimizer: перезагрузка для применения настроек"],
-                   capture_output=True)
+def apply_bluetooth_service(enable: bool):
+    """Включает или отключает службу Bluetooth."""
+    try:
+        if enable:
+            # Включаем службу Bluetooth
+            subprocess.run(["sc", "start", "bthserv"], 
+                          capture_output=True, creationflags=CREATE_NO_WINDOW)
+            subprocess.run(["sc", "config", "bthserv", "start=auto"], 
+                          capture_output=True, creationflags=CREATE_NO_WINDOW)
+        else:
+            # Отключаем службу Bluetooth
+            subprocess.run(["sc", "stop", "bthserv"], 
+                          capture_output=True, creationflags=CREATE_NO_WINDOW)
+            subprocess.run(["sc", "config", "bthserv", "start=disabled"], 
+                          capture_output=True, creationflags=CREATE_NO_WINDOW)
+    except Exception:
+        pass

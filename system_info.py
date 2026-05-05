@@ -9,31 +9,97 @@ import subprocess
 import winreg
 import threading
 import psutil
+import time
+import functools
+try:
+    import wmi
+except ImportError:
+    wmi = None
+try:
+    import pythoncom
+except ImportError:
+    pythoncom = None
+
+
+# Кэш для WMI данных
+_wmi_cache = {}
+
+def _run_powershell_query(command: str) -> str:
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _create_wmi_client():
+    initialized = False
+    if pythoncom:
+        try:
+            pythoncom.CoInitialize()
+            initialized = True
+        except Exception:
+            pass
+    return wmi.WMI(), initialized
+
+
+def _release_wmi_client(initialized: bool):
+    if initialized and pythoncom:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+def cache_wmi(seconds=5):
+    """Декоратор для кэширования результатов WMI запросов."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            key = f"{func.__name__}_{args}_{kwargs}"
+            now = time.time()
+            
+            # Проверяем кэш
+            if key in _wmi_cache:
+                result, timestamp = _wmi_cache[key]
+                if now - timestamp < seconds:
+                    return result
+            
+            # Получаем новые данные
+            result = func(*args, **kwargs)
+            _wmi_cache[key] = (result, now)
+            return result
+        return wrapper
+    return decorator
 
 
 def get_device_type() -> str:
     """Определяет тип устройства: Ноутбук или Стационарный ПК."""
+    # Первый метод - проверка батареи через psutil
     try:
-        # Проверяем наличие батареи через psutil
-        battery = psutil.sensors_battery()
-        if battery is not None:
+        if psutil.sensors_battery() is not None:
             return "Ноутбук"
     except Exception:
         pass
-    # Второй метод — через WMI (SystemEnclosure)
-    try:
-        result = subprocess.run(
-            ["powershell", "-Command",
-             "Get-WmiObject -Class Win32_SystemEnclosure | Select-Object -ExpandProperty ChassisTypes"],
-            capture_output=True, timeout=5
-        )
-        chassis = result.stdout.decode('cp866', errors='ignore').strip()
-        # 8=Portable,9=Laptop,10=Notebook,11=Hand Held,14=Sub Notebook
-        laptop_types = {"8", "9", "10", "11", "14"}
-        if any(t in chassis for t in laptop_types):
-            return "Ноутбук"
-    except Exception:
-        pass
+    
+    # Второй метод - через WMI (SystemEnclosure)
+    if wmi:
+        try:
+            c = wmi.WMI()
+            for enclosure in c.Win32_SystemEnclosure():
+                if enclosure.ChassisTypes:
+                    chassis_type = enclosure.ChassisTypes[0]
+                    # 8=Portable,9=Laptop,10=Notebook,11=Hand Held,14=Sub Notebook
+                    if chassis_type in [8, 9, 10, 11, 14]:
+                        return "Ноутбук"
+        except Exception:
+            pass
+    
     return "Стационарный ПК"
 
 
@@ -67,61 +133,58 @@ def get_cpu_info() -> str:
     return f"{cpu_name}\n  Ядра: {cores}  |  Потоки: {threads}"
 
 
+@cache_wmi(seconds=5)
 def get_gpu_info() -> str:
     """Возвращает название GPU и версию драйвера (NVIDIA приоритет)."""
-    try:
-        result = subprocess.run(
-            ["powershell", "-Command",
-             "Get-WmiObject Win32_VideoController | Select-Object Name,DriverVersion | Format-List"],
-            capture_output=True, timeout=6
-        )
-        output = result.stdout.decode('cp866', errors='ignore')
-        lines = output.strip().splitlines()
-        gpus = []
-        name, drv = "", ""
-        for line in lines:
-            if ":" in line:
-                key, _, val = line.partition(":")
-                k = key.strip().lower()
-                v = val.strip()
-                if k == "name":
-                    name = v
-                elif k == "driverversion":
-                    drv = v
-            elif line.strip() == "" and name:
-                gpus.append(f"{name}  (Драйвер: {drv})" if drv else name)
-                name, drv = "", ""
-        if name:
-            gpus.append(f"{name}  (Драйвер: {drv})" if drv else name)
-        return "\n  ".join(gpus) if gpus else "Неизвестно"
-    except Exception:
-        return "Неизвестно"
+    if wmi:
+        initialized = False
+        try:
+            c, initialized = _create_wmi_client()
+            gpus = []
+            for gpu in c.Win32_VideoController():
+                name = gpu.Name or "Неизвестный GPU"
+                driver = gpu.DriverVersion or ""
+                if driver:
+                    gpus.append(f"{name}  (Драйвер: {driver})")
+                else:
+                    gpus.append(name)
+            if gpus:
+                return "\n  ".join(gpus)
+        except Exception:
+            pass
+        finally:
+            _release_wmi_client(initialized)
+
+    output = _run_powershell_query(
+        "Get-CimInstance Win32_VideoController | "
+        "ForEach-Object { if ($_.DriverVersion) { \"$($_.Name)  (Драйвер: $($_.DriverVersion))\" } else { $_.Name } }"
+    )
+    return output if output else "Неизвестно"
 
 
+@cache_wmi(seconds=5)
 def get_motherboard_info() -> str:
     """Возвращает производителя и модель материнской платы."""
-    try:
-        result = subprocess.run(
-            ["powershell", "-Command",
-             "Get-WmiObject Win32_BaseBoard | Select-Object Manufacturer,Product | Format-List"],
-            capture_output=True, timeout=5
-        )
-        output = result.stdout.decode('cp866', errors='ignore')
-        lines = output.strip().splitlines()
-        mfr, product = "", ""
-        for line in lines:
-            if ":" in line:
-                key, _, val = line.partition(":")
-                k = key.strip().lower()
-                v = val.strip()
-                if k == "manufacturer":
-                    mfr = v
-                elif k == "product":
-                    product = v
-        if mfr or product:
-            return f"{mfr} {product}".strip()
-    except Exception:
-        pass
+    if wmi:
+        initialized = False
+        try:
+            c, initialized = _create_wmi_client()
+            for board in c.Win32_BaseBoard():
+                manufacturer = board.Manufacturer or ""
+                product = board.Product or ""
+                if manufacturer or product:
+                    return f"{manufacturer} {product}".strip()
+        except Exception:
+            pass
+        finally:
+            _release_wmi_client(initialized)
+
+    output = _run_powershell_query(
+        "$b = Get-CimInstance Win32_BaseBoard | Select-Object -First 1; "
+        "if ($b) { \"$($b.Manufacturer) $($b.Product)\".Trim() }"
+    )
+    if output:
+        return output
     return "Неизвестно"
 
 
@@ -191,6 +254,14 @@ def collect_all(callback=None) -> dict:
 
 def collect_all_async(callback) -> threading.Thread:
     """Запускает collect_all в фоновом потоке и вызывает callback с результатом."""
-    t = threading.Thread(target=collect_all, args=(callback,), daemon=True)
+    def safe_callback(data):
+        try:
+            callback(data)
+        except Exception as e:
+            print(f"Error in async callback: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    t = threading.Thread(target=collect_all, args=(safe_callback,), daemon=True)
     t.start()
     return t

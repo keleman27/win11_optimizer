@@ -6,95 +6,107 @@ import customtkinter as ctk
 import threading
 from tweaks import restart_explorer, restart_pc
 
-ACCENT     = "#4F8EF7"
-ACCENT_HOV = "#3A75E0"
-BG_CARD    = "#1E2130"
-BG_DARK    = "#161824"
-BORDER     = "#2D3354"
-TEXT_PRIM  = "#EAEEF8"
-TEXT_SEC   = "#8B9BB4"
-WARNING    = "#FF9800"
-SUCCESS    = "#4CAF50"
+from theme import (
+    ACCENT, ACCENT_HOV, BG_DARK, BORDER, TEXT_PRIM, TEXT_SEC
+)
 
 
 class RestartDialog(ctk.CTkToplevel):
     """
     Модальный диалог: предлагает перезапустить explorer.exe или ПК целиком.
-    Появляется после применения твиков проводника / системы.
     """
 
     def __init__(self, parent, needs_reboot: bool = False):
         super().__init__(parent)
         self.title("Применить изменения")
-        self.geometry("480x300")
+        
+        # Размеры и настройки
+        self.geometry("480x320")
         self.resizable(False, False)
         self.configure(fg_color=BG_DARK)
-        self.grab_set()          # модальность
-        self.focus_force()
-        self.lift()
-
-        # Центрирование относительно родителя
-        self.after(10, self._center)
-
+        
+        # Модальность и фокус
+        self.transient(parent)
+        self.grab_set()
+        
         self._needs_reboot = needs_reboot
+        
+        # Сначала строим UI
         self._build()
+        
+        # Потом центрируем и показываем
+        self.withdraw() # Скрываем на время позиционирования
+        self.after(100, self._show_and_center)
 
-    def _center(self):
+    def _show_and_center(self):
+        """Центрирует окно относительно родителя и показывает его."""
         self.update_idletasks()
-        pw = self.master.winfo_rootx() + self.master.winfo_width() // 2
-        ph = self.master.winfo_rooty() + self.master.winfo_height() // 2
-        x = pw - self.winfo_width() // 2
-        y = ph - self.winfo_height() // 2
-        self.geometry(f"+{x}+{y}")
+        if self.master:
+            mx = self.master.winfo_rootx()
+            my = self.master.winfo_rooty()
+            mw = self.master.winfo_width()
+            mh = self.master.winfo_height()
+            
+            x = mx + (mw // 2) - (self.winfo_width() // 2)
+            y = my + (mh // 2) - (self.winfo_height() // 2)
+            self.geometry(f"+{x}+{y}")
+        
+        self.deiconify() # Показываем
+        self.focus_force()
 
     def _build(self):
-        pad = {"padx": 28, "pady": 0}
+        pad = {"padx": 30}
 
-        # Иконка + заголовок
-        ctk.CTkLabel(self, text="🔄  Настройки применены",
+        # Контейнер для отступа сверху
+        main_frame = ctk.CTkFrame(self, fg_color="transparent")
+        main_frame.pack(fill="both", expand=True, pady=20)
+
+        # Заголовок
+        ctk.CTkLabel(main_frame, text="🔄  Настройки применены",
                      font=ctk.CTkFont("Segoe UI", 18, "bold"),
-                     text_color=TEXT_PRIM).pack(pady=(28, 6), **pad)
+                     text_color=TEXT_PRIM).pack(pady=(10, 8), **pad)
 
-        msg = ("Для вступления изменений в силу необходимо перезапустить "
-               "Проводник Windows или перезагрузить компьютер.")
-        ctk.CTkLabel(self, text=msg,
+        msg = ("Для вступления изменений в силу рекомендуется перезапустить "
+               "Проводник или перезагрузить компьютер.")
+        ctk.CTkLabel(main_frame, text=msg,
                      font=ctk.CTkFont("Segoe UI", 12),
-                     text_color=TEXT_SEC, wraplength=420, justify="center"
-                     ).pack(pady=(0, 24), **pad)
+                     text_color=TEXT_SEC, wraplength=400, justify="center"
+                     ).pack(pady=(0, 25), **pad)
 
         # Кнопки
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=28)
+        btn_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        btn_frame.pack(fill="x", **pad)
 
         ctk.CTkButton(
-            btn_frame, text="⟳  Перезапустить Explorer",
+            btn_frame, text="⟳  Перезапустить Проводник",
             font=ctk.CTkFont("Segoe UI", 13, "bold"),
             fg_color=ACCENT, hover_color=ACCENT_HOV,
-            height=42, corner_radius=10,
+            height=44, corner_radius=10,
             command=self._do_explorer
-        ).pack(fill="x", pady=(0, 8))
+        ).pack(fill="x", pady=(0, 10))
 
-        reboot_color = "#D97706" if self._needs_reboot else "#374151"
+        reboot_color = "#D97706" if self._needs_reboot else "#2D2D33"
         ctk.CTkButton(
-            btn_frame, text="🖥️  Перезагрузить ПК (через 10 сек)",
+            btn_frame, text="🖥️  Перезагрузить систему",
             font=ctk.CTkFont("Segoe UI", 13),
-            fg_color=reboot_color, hover_color="#92400E",
-            height=42, corner_radius=10,
+            fg_color=reboot_color, hover_color="#92400E" if self._needs_reboot else "#3F3F46",
+            height=44, corner_radius=10,
             command=self._do_reboot
-        ).pack(fill="x", pady=(0, 8))
+        ).pack(fill="x", pady=(0, 15))
 
         ctk.CTkButton(
-            btn_frame, text="Позже",
+            btn_frame, text="Сделаю это позже",
             font=ctk.CTkFont("Segoe UI", 12),
-            fg_color="transparent", hover_color="#1E2130",
+            fg_color="transparent", hover_color="#1E1E22",
             border_width=1, border_color=BORDER,
-            height=36, corner_radius=10,
+            height=38, corner_radius=10,
             text_color=TEXT_SEC,
             command=self.destroy
         ).pack(fill="x")
 
     def _do_explorer(self):
         self.destroy()
+        # Перезапуск в отдельном потоке, чтобы не вешать UI
         threading.Thread(target=restart_explorer, daemon=True).start()
 
     def _do_reboot(self):

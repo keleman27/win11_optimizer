@@ -1,39 +1,4 @@
-# Win11 Optimizer
-Это утилита оптимизации Windows 11.
-Язык: Python
-GUI: CustomTkinter
-Зависимости: psutil, wmi, pywin32
-
-Стиль кода: читаемый, с комментариями на русском.
-
-## Структура проекта
-
-```
-win11_optimizer/
-├── main.py          # Точка входа, Main GUI (Sidebar + контентная зона)
-├── dashboard.py     # Вкладка 1: Дашборд (Паспорт системы)
-├── system_info.py   # Модуль сбора системной информации
-└── README.md
-```
-
-## Запуск
-
-```powershell
-cd c:\Users\kiril\Music\win11_optimizer
-python main.py
-```
-
-## Зависимости
-
-```
-customtkinter
-psutil
-wmi
-pywin32
-```
-
-Установка: `python -m pip install customtkinter psutil wmi`
-
+Инструкции для ИИ-агента (Project Rules)
 1. Архитектурная дисциплина
 Соблюдение структуры: Любая новая логика должна попадать в соответствующий модуль. Функции оптимизации — в tweaks.py, сбор данных — в system_info.py, обновление интерфейса — в system_sync.py.
 

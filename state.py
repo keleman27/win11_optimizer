@@ -4,6 +4,7 @@
 class AppState:
     def __init__(self):
         self.device_type: str = "Стационарный ПК"
+        self.original_power_scheme: str = ""
         self._listeners: list = []
 
     def set_device_type(self, dtype: str):

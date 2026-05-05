@@ -16,6 +16,22 @@ BORDER      = "#28282D"
 TEXT_PRIM   = "#EAEEF8"
 TEXT_SEC    = "#8B9BB4"
 
+class SectionCard(ctk.CTkFrame):
+    def __init__(self, parent, title: str, icon: str = "", **kwargs):
+        super().__init__(parent, fg_color=BG_CARD, corner_radius=12, border_width=1, border_color=BORDER, **kwargs)
+        
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(16, 10))
+        
+        icon_lbl = ctk.CTkLabel(header, text=icon, font=ctk.CTkFont("Segoe UI", 18))
+        icon_lbl.pack(side="left", padx=(0, 10))
+        
+        title_lbl = ctk.CTkLabel(header, text=title, font=ctk.CTkFont("Segoe UI", 16, "bold"), text_color=TEXT_PRIM)
+        title_lbl.pack(side="left")
+        
+        self.body = ctk.CTkFrame(self, fg_color="transparent")
+        self.body.pack(fill="x", padx=20, pady=(0, 20))
+
 class TweakRow(ctk.CTkFrame):
     """Строка настройки: Иконка + (Заголовок/Описание) + Переключатель."""
     def __init__(self, parent, icon: str, title: str, description: str = "", default: bool = False, **kw):

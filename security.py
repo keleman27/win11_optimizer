@@ -13,11 +13,36 @@ ACCENT_HOV  = "#3A75E0"
 SUCCESS     = "#4CAF50"
 WARNING     = "#FF9800"
 DANGER      = "#F44336"
-BG_CARD     = "#1E2130"
-BG_DARK     = "#161824"
-BORDER      = "#2D3354"
+BG_CARD     = "#1A1A1E"
+BG_DARK     = "#111114"
+BORDER      = "#28282D"
 TEXT_PRIM   = "#EAEEF8"
 TEXT_SEC    = "#8B9BB4"
+
+class TweakRow(ctk.CTkFrame):
+    """Строка настройки: Иконка + (Заголовок/Описание) + Переключатель."""
+    def __init__(self, parent, icon: str, title: str, description: str = "", default: bool = False, **kw):
+        super().__init__(parent, fg_color="transparent", **kw)
+        self._var = ctk.BooleanVar(value=default)
+        
+        self._icon_lbl = ctk.CTkLabel(self, text=icon, font=ctk.CTkFont("Segoe UI", 16), text_color=ACCENT, width=30)
+        self._icon_lbl.pack(side="left", padx=(0, 15))
+        
+        self._text_container = ctk.CTkFrame(self, fg_color="transparent")
+        self._text_container.pack(side="left", fill="both", expand=True)
+        
+        self._title_lbl = ctk.CTkLabel(self._text_container, text=title, font=ctk.CTkFont("Segoe UI", 13, "bold"), text_color=TEXT_PRIM, anchor="w")
+        self._title_lbl.pack(fill="x")
+        
+        if description:
+            self._desc_lbl = ctk.CTkLabel(self._text_container, text=description, font=ctk.CTkFont("Segoe UI", 11), text_color=TEXT_SEC, anchor="w", justify="left")
+            self._desc_lbl.pack(fill="x")
+        
+        self._sw = ctk.CTkSwitch(self, text="", variable=self._var, progress_color=ACCENT, width=45)
+        self._sw.pack(side="right", padx=(10, 0))
+
+    def get(self): return self._var.get()
+    def set(self, val): self._var.set(val)
 
 class SectionCard(ctk.CTkFrame):
     def __init__(self, parent, title: str, icon: str = "", **kwargs):
@@ -83,17 +108,9 @@ class SecurityFrame(ctk.CTkScrollableFrame):
         stack_card = SectionCard(self, "Безопасность Windows (Advanced)", "🛡️")
         stack_card.pack(fill="x", padx=24, pady=(0, 10))
 
-        self._stack_var = ctk.BooleanVar(value=False)
-        stack_cb = ctk.CTkCheckBox(stack_card.body, text="Отключить Аппаратную защиту стека в режиме ядра",
-                                   variable=self._stack_var, font=ctk.CTkFont("Segoe UI", 13, "bold"),
-                                   text_color=TEXT_PRIM, fg_color=ACCENT, hover_color=ACCENT_HOV,
-                                   command=self._on_stack_toggle)
-        stack_cb.pack(anchor="w", pady=(0, 5))
-
-        stack_desc = ctk.CTkLabel(stack_card.body, 
-                                  text="если отключить может влиять на корректную работу античита FACEIT и других.",
-                                  font=ctk.CTkFont("Segoe UI", 11), text_color=TEXT_SEC, justify="left")
-        stack_desc.pack(anchor="w", padx=30, pady=(0, 10))
+        self._stack_row = TweakRow(stack_card.body, "🔐", "Защита стека в режиме ядра", 
+                                   "Может влиять на античиты (FACEIT и др.).", default=False)
+        self._stack_row.pack(fill="x", pady=5)
 
         # ── Блок 3: Активация ───────────────────────────────────────────────
         act_card = SectionCard(self, "Активация Windows", "🔑")
@@ -116,7 +133,8 @@ class SecurityFrame(ctk.CTkScrollableFrame):
     def _check_bitlocker_status(self):
         def task():
             try:
-                res = subprocess.run(["manage-bde", "-status", "C:"], capture_output=True, timeout=5)
+                from tweaks import CREATE_NO_WINDOW
+                res = subprocess.run(["manage-bde", "-status", "C:"], capture_output=True, timeout=5, creationflags=CREATE_NO_WINDOW)
                 output = res.stdout.decode('cp866', errors='ignore')
                 
                 # Проверяем "Состояние преобразования" (Conversion Status)
@@ -139,7 +157,8 @@ class SecurityFrame(ctk.CTkScrollableFrame):
         self._bit_btn.configure(state="disabled", text="Выполняется...")
         def task():
             try:
-                subprocess.run(["manage-bde", "-off", "C:"], capture_output=True)
+                from tweaks import CREATE_NO_WINDOW
+                subprocess.run(["manage-bde", "-off", "C:"], capture_output=True, creationflags=CREATE_NO_WINDOW)
                 self.after(2000, self._check_bitlocker_status)
                 self.after(2000, lambda: self._bit_btn.configure(text="Запрос отправлен"))
             except Exception:

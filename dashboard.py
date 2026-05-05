@@ -84,6 +84,7 @@ class SysPassportCard(ctk.CTkFrame):
             border_color=BORDER,
             **kwargs
         )
+        self._resize_after_id = None
         self._build_skeleton()
 
     # ── внутренние методы ──────────────────────────────────────────────────
@@ -154,18 +155,37 @@ class SysPassportCard(ctk.CTkFrame):
         val_lbl = ctk.CTkLabel(
             row, text=value,
             font=ctk.CTkFont("Segoe UI", 12),
-            text_color=TEXT_PRIM, anchor="w", justify="left"
+            text_color=TEXT_PRIM, anchor="w", justify="left",
+            width=200 # Fixed width for value labels to prevent jitter
         )
         val_lbl.pack(side="left", fill="x", expand=True)
-        # Dynamically update wraplength on resize safely
-        def _resize_val_lbl(e, lbl=val_lbl):
-            current = lbl.cget("wraplength")
-            new_w = max(100, e.width - 10)
-            if current == "" or abs(int(current) - new_w) > 5:
-                lbl.configure(wraplength=new_w)
+        # Dynamically update wraplength on resize safely with debounce
+        def _resize_val_lbl(e, lbl=val_lbl, self=self):
+            # Отменяем предыдущий запланированный вызов
+            if hasattr(self, '_resize_after_id') and self._resize_after_id is not None:
+                try:
+                    self.after_cancel(self._resize_after_id)
+                except Exception:
+                    pass
+            
+            def _do_resize():
+                self._resize_after_id = None
+                try:
+                    if not lbl.winfo_exists():
+                        return
+                    current = lbl.cget("wraplength")
+                    new_w = max(100, e.width - 10)
+                    if current == "" or abs(int(current) - new_w) > 5:
+                        lbl.configure(wraplength=new_w)
+                except Exception:
+                    pass
+            
+            self._resize_after_id = self.after(50, _do_resize)
+        
         val_lbl.bind("<Configure>", _resize_val_lbl)
         
         self._row_labels[label] = val_lbl
+
 
     def populate(self, data: dict):
         """Заполняет карточку реальными данными (вызывается из main thread)."""
@@ -204,6 +224,24 @@ class SysPassportCard(ctk.CTkFrame):
             ).pack(anchor="w")
 
         self._status_dot.configure(text="✅ Актуально", text_color=SUCCESS)
+
+    def update_ram(self, value: str):
+        """Обновляет строку ОЗУ (вызывается из sync_engine)."""
+        try:
+            # Additional thread safety check
+            import threading
+            if threading.current_thread() is not threading.main_thread():
+                print("Warning: update_ram called from background thread")
+                return
+                
+            if hasattr(self, 'winfo_exists') and not self.winfo_exists():
+                return
+            lbl = self._row_labels.get("ОЗУ")
+            if lbl and hasattr(lbl, 'winfo_exists') and lbl.winfo_exists():
+                lbl.configure(text=value)
+        except Exception as e:
+            print(f"RAM update error: {e}")
+            pass  # Silently ignore errors from destroyed widgets
 
 
 class RestorePointStatus(ctk.CTkFrame):
@@ -256,9 +294,11 @@ class RestorePointStatus(ctk.CTkFrame):
                     'Checkpoint-Computer -Description "Win11Optimizer Backup" -RestorePointType MODIFY_SETTINGS'
                 )
                 
+                from tweaks import CREATE_NO_WINDOW
                 res = subprocess.run(
                     ["powershell", "-Command", ps_cmd],
-                    capture_output=True, text=True, timeout=180
+                    capture_output=True, text=True, timeout=180,
+                    creationflags=CREATE_NO_WINDOW
                 )
                 
                 if res.returncode == 0:
@@ -305,9 +345,55 @@ class DashboardFrame(ctk.CTkScrollableFrame):
         )
         self._switch_tab = switch_tab_callback
         self._device_type = "…"
+        self._registered_callbacks = []  # Store callback references for cleanup
         self._build_ui()
         # Асинхронный сбор данных
         collect_all_async(self._on_data_ready)
+
+        # Defer callback registration until after main loop is ready
+        self.after(200, self._register_sync_callbacks)
+
+    def _register_sync_callbacks(self):
+        """Register sync engine callbacks after main loop is ready."""
+        try:
+            from system_sync import sync_engine
+            # Verify sync engine has dispatcher ready before registering
+            if sync_engine._dispatcher is None:
+                # Retry after a short delay
+                self.after(100, self._register_sync_callbacks)
+                return
+                
+            ram_callback = self._passport.update_ram
+            sync_engine.register("ram_info", ram_callback)
+            self._registered_callbacks.append(("ram_info", ram_callback))
+        except Exception as e:
+            print(f"Error registering sync callbacks: {e}")
+            # Retry once after delay
+            self.after(200, self._register_sync_callbacks)
+
+    def cleanup_callbacks(self):
+        """Unregister all callbacks registered by this frame."""
+        try:
+            from system_sync import sync_engine
+            sync_engine.unregister_all(self)
+            self._registered_callbacks.clear()
+        except Exception as e:
+            print(f"Callback cleanup error: {e}")
+
+    def on_show(self):
+        """Вызывается при переключении на эту вкладку."""
+        # Обновляем инфо о батарее, если это ноутбук
+        if self._device_type == "Ноутбук":
+            battery = get_battery_info()
+            if battery:
+                pct = battery["percent"]
+                plugged = battery["plugged"]
+                plug_icon = "⚡" if plugged else "🔋"
+                bat_color = SUCCESS if pct >= 50 else (WARNING if pct >= 20 else DANGER)
+                self._battery_label.configure(
+                    text=f"{plug_icon} {pct:.0f}%",
+                    text_color=bat_color
+                )
 
     # ── построение интерфейса ──────────────────────────────────────────────
 
@@ -388,8 +474,14 @@ class DashboardFrame(ctk.CTkScrollableFrame):
 
     def _on_data_ready(self, data: dict):
         """Вызывается из фонового потока после сбора данных."""
-        # Все изменения GUI — только через after()
-        self.after(0, lambda: self._update_ui(data))
+        try:
+            # Все изменения GUI — только через after()
+            if hasattr(self, 'after') and self.winfo_exists():
+                self.after(0, lambda: self._update_ui(data))
+            else:
+                print("Warning: Widget not ready for data update")
+        except Exception as e:
+            print(f"Error in _on_data_ready: {e}")
 
     def _update_ui(self, data: dict):
         """Обновляет все виджеты реальными данными (main thread)."""
@@ -422,3 +514,11 @@ class DashboardFrame(ctk.CTkScrollableFrame):
     def _on_cta_click(self):
         if self._switch_tab:
             self._switch_tab(1)  # индекс вкладки «Рекомендуемые настройки»
+
+    def __del__(self):
+        """Cleanup when frame is destroyed."""
+        try:
+            self.cleanup_callbacks()
+        except Exception:
+            pass  # Ignore errors during cleanup
+

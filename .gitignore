@@ -5,3 +5,8 @@ __pycache__/
 *.png
 *.log
 scratch/
+.venv/
+backups/
+err.txt
+output.txt
+test_*_out*.txt

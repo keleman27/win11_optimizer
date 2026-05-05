@@ -7,7 +7,17 @@ import threading
 from tweaks import (
     VISUAL_EFFECTS, apply_visual_effects, apply_power_plan,
     apply_copilot_disable, apply_explorer_settings,
-    get_visual_effects_state, is_copilot_disabled
+    get_visual_effects_state, is_copilot_disabled,
+    get_current_power_scheme_guid, set_power_scheme,
+    is_recommended_power_plan_active,
+    POWER_BALANCED, POWER_HIGH, POWER_ULTIMATE,
+    apply_dark_mode, get_dark_mode_state,
+    get_game_mode_state, apply_game_mode,
+    is_m365_copilot_blocked,
+    is_launch_to_this_pc, is_recycle_bin_in_nav,
+    is_recycle_bin_hidden_on_desktop, is_end_task_enabled,
+    is_end_task_supported,
+    restart_explorer,
 )
 from registry_backup import backup_all_tweak_keys
 from restart_dialog import RestartDialog
@@ -20,12 +30,12 @@ ACCENT_HOV  = "#3A75E0"
 SUCCESS     = "#4CAF50"
 WARNING     = "#FF9800"
 DANGER      = "#F44336"
-BG_CARD     = "#1E2130"
-BG_DARK     = "#161824"
-BORDER      = "#2D3354"
+BG_CARD     = "#1A1A1E"
+BG_DARK     = "#111114"
+BORDER      = "#28282D"
 TEXT_PRIM   = "#EAEEF8"
 TEXT_SEC    = "#8B9BB4"
-NAV_ACTIVE  = "#1E2A45"
+NAV_ACTIVE  = "#1E1E24"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -52,7 +62,7 @@ class SectionCard(ctk.CTkFrame):
 
         ctk.CTkLabel(
             self._header, text=f"{icon}  {title}",
-            font=ctk.CTkFont("Segoe UI", 14, "bold"),
+            font=ctk.CTkFont("Segoe UI", 15, "bold"),
             text_color=TEXT_PRIM
         ).pack(side="left")
 
@@ -160,7 +170,28 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
                          scrollbar_button_hover_color=ACCENT, **kw)
         self._switch_tab = switch_tab_callback
         self._fx_checkboxes: list[TweakCheckbox] = []
+        self._initial_state = {} # {cb_object: bool}
+        self._registered_callbacks = []  # Store callback references for cleanup
         self._build_ui()
+        self._refresh_fx_checkboxes()
+
+    def cleanup_callbacks(self):
+        """Unregister all callbacks registered by this frame."""
+        from system_sync import sync_engine
+        sync_engine.unregister_all(self)
+
+    def on_show(self):
+        """Вызывается при переключении на эту вкладку (синхронизация)."""
+        # Обновляем только визуальные эффекты (быстрая операция реестра)
+        self._refresh_fx_checkboxes() 
+        # Остальные состояния будут обновляться через sync_engine, т.к. они зарегистрированы
+        self._capture_initial_state() # Запоминаем текущее состояние для кнопки "Применить"
+
+    def _refresh_fx_checkboxes(self):
+        """Обновляет состояние чекбоксов визуальных эффектов."""
+        enabled_fx = get_visual_effects_state()
+        for i, cb in enumerate(self._fx_checkboxes):
+            cb.set(i in enabled_fx)
 
     # ── Построение интерфейса ─────────────────────────────────────────────
 
@@ -180,7 +211,8 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
             height=40, corner_radius=10,
             command=self._on_apply
         )
-        self._apply_btn.pack(side="left", padx=(0, 8))
+        # Button starts hidden until changes are detected
+        # self._apply_btn.pack(side="left", padx=(0, 8)) # Will be packed in _check_for_changes
 
         ctk.CTkButton(
             bar, text="Выделить всё",
@@ -200,11 +232,21 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
             command=lambda: self._select_all(False)
         ).pack(side="left", padx=(0, 8))
 
-        ctk.CTkButton(
-            bar, text="⭐ По умолчанию",
+        self._default_btn = ctk.CTkButton(
+            bar, text="↩️ Сбросить",
             font=ctk.CTkFont("Segoe UI", 12),
-            fg_color="transparent", hover_color="#1A2A1A",
-            border_width=1, border_color="#4CAF50", text_color="#4CAF50",
+            fg_color="transparent", hover_color="#1F2937",
+            border_width=1, border_color=WARNING, text_color=WARNING,
+            height=40, corner_radius=10,
+            command=self._revert_to_initial
+        )
+        self._default_btn.pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            bar, text="⭐ Рекомендовано",
+            font=ctk.CTkFont("Segoe UI", 12),
+            fg_color="transparent", hover_color="#1F2937",
+            border_width=1, border_color=SUCCESS, text_color=SUCCESS,
             height=40, corner_radius=10,
             command=self._set_defaults
         ).pack(side="left")
@@ -225,7 +267,7 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
         enabled_fx = get_visual_effects_state()
         for i, fx in enumerate(VISUAL_EFFECTS):
             is_enabled = i in enabled_fx
-            cb = TweakCheckbox(cols, fx["label"], default=is_enabled, command=self._clear_status)
+            cb = TweakCheckbox(cols, fx["label"], default=is_enabled, command=self._on_checkbox_toggle)
             cb.grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=1)
             self._fx_checkboxes.append(cb)
 
@@ -234,48 +276,83 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
         pwr_card.pack(fill="x", padx=24, pady=(0, 10))
 
         is_laptop = app_state.device_type == "Ноутбук"
-        pwr_label = ("Сбалансированная (ноутбук)" if is_laptop
-                     else "Максимальная производительность")
-        pwr_default = not is_laptop   # для ПК — галочка стоит по умолчанию
+        pwr_label = "сбалансированная" if is_laptop else "максимальная производительность"
 
+        from tweaks import is_recommended_power_plan_active
         self._pwr_cb = TweakCheckbox(
             pwr_card.body,
             f"Схема питания: {pwr_label}",
-            default=pwr_default,
-            command=self._clear_status
+            default=is_recommended_power_plan_active(is_laptop),
+            command=self._on_checkbox_toggle
         )
         self._pwr_cb.pack(anchor="w")
 
+        from tweaks import get_sleep_disabled_state
         sleep_label = "Отключить сон и отключение экрана (⚠️ может вызвать перегрев в сумке)" if is_laptop else "Отключить сон и отключение экрана (Никогда)"
         self._sleep_cb = TweakCheckbox(
-            pwr_card.body, sleep_label, default=pwr_default, command=self._clear_status)
+            pwr_card.body, sleep_label, default=get_sleep_disabled_state(), command=self._on_checkbox_toggle)
         self._sleep_cb.pack(anchor="w")
 
         self._copilot_cb = TweakCheckbox(
             pwr_card.body, "Отключить кнопку Copilot на панели задач",
-            default=is_copilot_disabled(), command=self._clear_status)
+            default=is_copilot_disabled(), command=self._on_checkbox_toggle)
         self._copilot_cb.pack(anchor="w")
+
+        # M365 Copilot functionality removed
+        # self._m365_copilot_cb = TweakCheckbox(
+        #     pwr_card.body, "Заблокировать Microsoft 365 Copilot",
+        #     default=is_m365_copilot_blocked(), command=self._on_checkbox_toggle)
+        # self._m365_copilot_cb.pack(anchor="w")
 
         # ── Блок: Текущее состояние системы (Audit) ──────────────────────
         audit_card = SectionCard(self, "Аудит и Состояние системы", "🔍", expanded=True)
         audit_card.pack(fill="x", padx=24, pady=(0, 10))
         
         self._sync_items = {} # {key: checkbox}
+
+        # Инфо об ОЗУ (динамическое)
+        ram_row = ctk.CTkFrame(audit_card.body, fg_color="transparent")
+        ram_row.pack(fill="x", pady=(2, 6))
         
-        audit_items = [
-            ("dark_mode", "Тёмная тема Windows"),
-            ("high_perf", "Режим высокой производительности"),
-            ("game_mode", "Игровой режим (Game Mode)"),
-            ("wifi_enabled", "Wi-Fi адаптер"),
-            ("bluetooth_enabled", "Bluetooth сервис")
-        ]
+        ctk.CTkLabel(
+            ram_row, text="📊 Состояние ОЗУ:", 
+            font=ctk.CTkFont("Segoe UI", 12), 
+            text_color=TEXT_SEC
+        ).pack(side="left", padx=(4, 8))
         
-        for key, label in audit_items:
-            cb = TweakCheckbox(audit_card.body, label, default=False)
-            cb.pack(anchor="w")
-            self._sync_items[key] = cb
-            # Register for real-time updates
-            sync_engine.register(key, cb.set)
+        self._ram_lbl = ctk.CTkLabel(
+            ram_row, text="Загрузка...", 
+            font=ctk.CTkFont("Segoe UI", 12, "bold"), 
+            text_color=TEXT_PRIM
+        )
+        self._ram_lbl.pack(side="left")
+        
+        sync_engine.register("ram_info", lambda v: self._ram_lbl.configure(text=v))
+        
+        # Специальный чекбокс для Темной темы (с обработчиком)
+        self._dark_mode_cb = TweakCheckbox(
+            audit_card.body, "Тёмная тема Windows", 
+            default=get_dark_mode_state(), 
+            command=self._on_checkbox_toggle
+        )
+        self._dark_mode_cb.pack(anchor="w")
+        self._sync_items["dark_mode"] = self._dark_mode_cb
+        dark_mode_callback = self._create_sync_wrapper(self._dark_mode_cb)
+        sync_engine.register("dark_mode", dark_mode_callback)
+        self._registered_callbacks.append(("dark_mode", dark_mode_callback))
+
+                
+        # Game Mode checkbox (interactive)
+        self._game_mode_cb = TweakCheckbox(
+            audit_card.body, "Игровой режим (Game Mode)",
+            default=get_game_mode_state(),
+            command=self._on_checkbox_toggle
+        )
+        self._game_mode_cb.pack(anchor="w")
+        self._sync_items["game_mode"] = self._game_mode_cb
+        game_mode_callback = self._create_sync_wrapper(self._game_mode_cb)
+        sync_engine.register("game_mode", game_mode_callback)
+        self._registered_callbacks.append(("game_mode", game_mode_callback))
 
         # Обновляем подпись схемы питания, если тип устройства сменится
         app_state.on_device_type_change(self._refresh_power_label)
@@ -285,20 +362,37 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
         exp_card.pack(fill="x", padx=24, pady=(0, 10))
 
         self._launch_cb = TweakCheckbox(
-            exp_card.body, "Открывать «Этот компьютер» по умолчанию", default=True, command=self._clear_status)
+            exp_card.body, "Открывать «Этот компьютер» по умолчанию", default=is_launch_to_this_pc(), command=self._on_checkbox_toggle)
         self._launch_cb.pack(anchor="w")
 
         self._recycle_nav_cb = TweakCheckbox(
-            exp_card.body, "Добавить Корзину в боковую панель Проводника", default=True, command=self._clear_status)
+            exp_card.body, "Добавить Корзину в боковую панель Проводника", default=is_recycle_bin_in_nav(), command=self._on_checkbox_toggle)
         self._recycle_nav_cb.pack(anchor="w")
 
         self._hide_recycle_cb = TweakCheckbox(
-            exp_card.body, "Скрыть Корзину с Рабочего стола", default=False, command=self._clear_status)
+            exp_card.body, "Скрыть Корзину с Рабочего стола", default=is_recycle_bin_hidden_on_desktop(), command=self._on_checkbox_toggle)
         self._hide_recycle_cb.pack(anchor="w")
 
         self._kill_task_cb = TweakCheckbox(
-            exp_card.body, "Включить функцию «Завершить задачу» (Kill task)", default=True, command=self._clear_status)
+            exp_card.body, "Включить функцию «Завершить задачу» (Kill task)", 
+            default=is_end_task_enabled() if is_end_task_supported() else False,
+            command=self._on_checkbox_toggle)
         self._kill_task_cb.pack(anchor="w")
+        if not is_end_task_supported():
+            self._kill_task_cb._cb.configure(state="disabled")
+
+        # Синхронизация состояний проводника
+        explorer_sync_map = {
+            "explorer_launch_this_pc": self._launch_cb,
+            "recycle_in_nav": self._recycle_nav_cb,
+            "recycle_hidden_desktop": self._hide_recycle_cb,
+            "end_task_enabled": self._kill_task_cb,
+        }
+        for key, cb in explorer_sync_map.items():
+            self._sync_items[key] = cb
+            wrapper = self._create_sync_wrapper(cb)
+            sync_engine.register(key, wrapper)
+            self._registered_callbacks.append((key, wrapper))
 
         # ── Блок 4: Игровой режим (усечённый) ────────────────────────────
         MiniBlock(
@@ -326,27 +420,86 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
     def _refresh_power_label(self, dtype: str):
         """Обновляет подпись схемы питания при смене типа устройства."""
         is_laptop = dtype == "Ноутбук"
-        label = ("Сбалансированная (ноутбук)" if is_laptop
-                 else "Максимальная производительность")
+        label = "сбалансированная" if is_laptop else "максимальная производительность"
         self._pwr_cb._cb.configure(text=f"Схема питания: {label}")
-        self._pwr_cb.set(not is_laptop)
 
         sleep_label = "Отключить сон и отключение экрана (⚠️ может вызвать перегрев в сумке)" if is_laptop else "Отключить сон и отключение экрана (Никогда)"
         self._sleep_cb._cb.configure(text=sleep_label)
-        self._sleep_cb.set(not is_laptop)
+        
+        # Перепроверяем состояние чекбоксов, так как критерии "рекомендованности" изменились
+        self._refresh_checkboxes()
+
+    def _capture_initial_state(self):
+        """Сохраняет текущие значения всех чекбоксов для отката."""
+        self._initial_state = {}
+        for cb in self._fx_checkboxes:
+            self._initial_state[cb] = cb.get()
+        for cb in (self._pwr_cb, self._copilot_cb, self._sleep_cb,
+                   self._launch_cb, self._recycle_nav_cb, self._hide_recycle_cb, self._kill_task_cb,
+                   self._dark_mode_cb, self._game_mode_cb):
+            self._initial_state[cb] = cb.get()
+        self._update_apply_button_visibility()
+
+    def _create_sync_wrapper(self, cb):
+        """Создает обертку для sync_engine callback, обновляющую initial_state."""
+        def wrapper(value):
+            try:
+                # Check if widget still exists before updating
+                if hasattr(cb, 'winfo_exists') and not cb.winfo_exists():
+                    return
+                # Skip sync for disabled checkboxes (e.g. Kill Task on unsupported builds)
+                if hasattr(cb, '_cb') and str(cb._cb.cget('state')) == 'disabled':
+                    return
+                # Если пользователь уже изменил значение и не применил, не затираем его
+                current_initial = self._initial_state.get(cb)
+                if current_initial is not None and cb.get() != current_initial:
+                    return
+                # Обновляем чекбокс
+                cb.set(value)
+                # Всегда обновляем initial_state при автоматической синхронизации
+                # чтобы отслеживать реальные изменения системы
+                self._initial_state[cb] = value
+                # Проверяем, нужно ли скрыть кнопку Применить
+                # Check if frame still exists
+                if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                    self._update_apply_button_visibility()
+            except Exception:
+                pass  # Silently ignore errors from destroyed widgets
+        return wrapper
 
     def _clear_status(self):
-        """Скрывает статусное сообщение при ручном изменении настроек."""
-        if self._status_lbl.cget("text") == "⭐ Выбраны рекомендуемые настройки Win11 Optimizer":
-            self._status_lbl.configure(text="")
+        """Скрывает статусное сообщение."""
+        self._status_lbl.configure(text="")
+
+    def _on_checkbox_toggle(self):
+        self._clear_status()
+        self._update_apply_button_visibility()
+
+    def _update_apply_button_visibility(self):
+        """Показывает кнопку Применить, если есть изменения."""
+        has_changes = False
+        for cb, val in self._initial_state.items():
+            if cb.get() != val:
+                has_changes = True
+                break
+        
+        if has_changes:
+            if not self._apply_btn.winfo_ismapped():
+                self._apply_btn.pack(side="left", padx=(0, 8), before=self._status_lbl)
+        else:
+            self._apply_btn.pack_forget()
 
     def _select_all(self, state: bool):
-        self._clear_status()
-        for cb in self._fx_checkboxes:
+        for cb in self._initial_state.keys():
             cb.set(state)
-        for cb in (self._pwr_cb, self._copilot_cb, self._sleep_cb,
-                   self._launch_cb, self._recycle_nav_cb, self._hide_recycle_cb, self._kill_task_cb):
-            cb.set(state)
+        self._on_checkbox_toggle()
+
+    def _revert_to_initial(self):
+        """Восстанавливает настройки до изменений пользователя."""
+        for cb, val in self._initial_state.items():
+            cb.set(val)
+        self._on_checkbox_toggle()
+        self._status_lbl.configure(text="↩️ Изменения сброшены", text_color=WARNING)
 
     def _set_defaults(self):
         """Восстанавливает рекомендуемые настройки Win11 Optimizer."""
@@ -356,20 +509,27 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
 
         # Питание и сон
         is_laptop = app_state.device_type == "Ноутбук"
-        self._pwr_cb.set(not is_laptop)
+        self._pwr_cb.set(True)
         self._sleep_cb.set(not is_laptop)
 
         # Copilot — отключить (рекомендуется)
         self._copilot_cb.set(True)
 
+        # Microsoft 365 Copilot — заблокировать (рекомендуется)
+        # self._m365_copilot_cb.set(True)
+
+        # Game Mode — включить (рекомендуется)
+        self._game_mode_cb.set(True)
+
         # Проводник
         self._launch_cb.set(True)        # Этот компьютер
         self._recycle_nav_cb.set(True)   # Корзина в боковой панели
         self._hide_recycle_cb.set(False) # Не скрывать корзину с рабочего стола
-        self._kill_task_cb.set(True)     # Kill task
+        self._kill_task_cb.set(is_end_task_supported())     # Kill task (only if supported)
 
+        self._on_checkbox_toggle()
         self._status_lbl.configure(
-            text="⭐ Выбраны рекомендуемые настройки Win11 Optimizer",
+            text="⭐ Выбраны рекомендуемые настройки",
             text_color="#4CAF50"
         )
 
@@ -385,29 +545,72 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
             # 1. Бэкап реестра
             backup_all_tweak_keys()
 
-            # 2. Визуальные эффекты
-            enabled = [i for i, cb in enumerate(self._fx_checkboxes)
-                       if cb.var.get()]
-            apply_visual_effects(enabled)
-            needs_restart = True
-
-            # 3. Питание
-            if self._pwr_cb.var.get():
-                is_laptop = app_state.device_type == "Ноутбук"
-                apply_power_plan(is_laptop)
-
-            # 4. Copilot
-            if self._copilot_cb.var.get():
-                apply_copilot_disable()
+            # 2. Визуальные эффекты (Требуют перезапуск)
+            fx_changed = False
+            for cb in self._fx_checkboxes:
+                if cb.get() != self._initial_state[cb]:
+                    fx_changed = True
+                    break
+            
+            if fx_changed:
+                enabled = [i for i, cb in enumerate(self._fx_checkboxes) if cb.get()]
+                apply_visual_effects(enabled)
                 needs_restart = True
 
-            # 5. Проводник
-            apply_explorer_settings(
-                open_to_this_pc=self._launch_cb.var.get(),
-                recycle_in_nav=self._recycle_nav_cb.var.get(),
-                hide_recycle_desktop=self._hide_recycle_cb.var.get()
-            )
-            needs_restart = True
+            # 3. Питание (НЕ требуют перезапуск)
+            if self._pwr_cb.get() != self._initial_state[self._pwr_cb]:
+                if self._pwr_cb.get():
+                    # Сохраняем текущую схему перед применением оптимизации
+                    app_state.original_power_scheme = get_current_power_scheme_guid()
+                    is_laptop = app_state.device_type == "Ноутбук"
+                    apply_power_plan(is_laptop)
+                else:
+                    # Восстанавливаем старую схему
+                    if app_state.original_power_scheme:
+                        set_power_scheme(app_state.original_power_scheme)
+                    else:
+                        # Если бэкапа нет (программа только запустилась), ставим Balanced по умолчанию
+                        set_power_scheme(POWER_BALANCED)
+            
+            # Сон и монитор (НЕ требуют перезапуск)
+            if self._sleep_cb.get() != self._initial_state[self._sleep_cb]:
+                from tweaks import apply_sleep_timeouts
+                apply_sleep_timeouts(self._sleep_cb.get())
+
+            # Темная тема (НЕ требует перезапуск)
+            if self._dark_mode_cb.get() != self._initial_state[self._dark_mode_cb]:
+                from tweaks import apply_dark_mode
+                apply_dark_mode(self._dark_mode_cb.get())
+
+            # Game Mode (НЕ требует перезапуск)
+            if self._game_mode_cb.get() != self._initial_state[self._game_mode_cb]:
+                apply_game_mode(self._game_mode_cb.get())
+
+            # 4. Copilot (Требует перезапуск explorer.exe)
+            if self._copilot_cb.get() != self._initial_state[self._copilot_cb]:
+                apply_copilot_disable(self._copilot_cb.get())
+                # Перезапускаем explorer.exe для немедленного применения изменений
+                restart_explorer()
+                needs_restart = False  # explorer.exe перезапущен, полная перезагрузка не нужна
+
+            # 4.1. Microsoft 365 Copilot functionality removed
+
+            # 5. Проводник (Требует перезапуск)
+            exp_tweaks = [self._launch_cb, self._recycle_nav_cb, self._hide_recycle_cb, self._kill_task_cb]
+            explorer_changed = any(cb.get() != self._initial_state[cb] for cb in exp_tweaks)
+            print(f"[DEBUG] _apply_worker: explorer_changed={explorer_changed}")
+            for cb in exp_tweaks:
+                print(f"[DEBUG]   cb={cb._cb.cget('text')[:40]} current={cb.get()} initial={self._initial_state.get(cb)}")
+            if explorer_changed:
+                apply_explorer_settings(
+                    open_to_this_pc=self._launch_cb.get(),
+                    recycle_in_nav=self._recycle_nav_cb.get(),
+                    hide_recycle_desktop=self._hide_recycle_cb.get(),
+                    enable_end_task=self._kill_task_cb.get()
+                )
+                print("[DEBUG] _apply_worker: calling restart_explorer()")
+                restart_explorer()
+                print("[DEBUG] _apply_worker: restart_explorer() done")
 
             self.after(0, lambda: self._on_done(needs_restart, success=True))
         except Exception as e:
@@ -417,9 +620,17 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
         self._apply_btn.configure(state="normal", text="✅  Применить выбранное")
         if success:
             self._status_lbl.configure(
-                text="✔ Бэкап создан, настройки применены", text_color=SUCCESS)
+                text="✔ Настройки применены", text_color=SUCCESS)
+            self._capture_initial_state() # Update state after success
             if needs_restart:
                 RestartDialog(self.winfo_toplevel())
         else:
             self._status_lbl.configure(
                 text=f"❌ Ошибка: {error}", text_color=DANGER)
+
+    def __del__(self):
+        """Cleanup when frame is destroyed."""
+        try:
+            self.cleanup_callbacks()
+        except Exception:
+            pass  # Ignore errors during cleanup

@@ -1,0 +1,3 @@
+wmi>=1.5.1
+customtkinter>=5.2.0
+psutil>=5.9.0

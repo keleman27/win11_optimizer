@@ -56,11 +56,27 @@ ACCENT      = "#4F8EF7"
 ACCENT_HOV  = "#3A75E0"
 SUCCESS     = "#4CAF50"
 WARNING     = "#FF9800"
-BG_CARD     = "#1E2130"
-BG_DARK     = "#161824"
-BORDER      = "#2D3354"
+BG_CARD     = "#1A1A1E"
+BG_DARK     = "#111114"
+BORDER      = "#28282D"
 TEXT_PRIM   = "#EAEEF8"
 TEXT_SEC    = "#8B9BB4"
+
+class SectionCard(ctk.CTkFrame):
+    def __init__(self, parent, title: str, icon: str = "", **kwargs):
+        super().__init__(parent, fg_color=BG_CARD, corner_radius=12, border_width=1, border_color=BORDER, **kwargs)
+        
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(16, 10))
+        
+        icon_lbl = ctk.CTkLabel(header, text=icon, font=ctk.CTkFont("Segoe UI", 18))
+        icon_lbl.pack(side="left", padx=(0, 10))
+        
+        title_lbl = ctk.CTkLabel(header, text=title, font=ctk.CTkFont("Segoe UI", 16, "bold"), text_color=TEXT_PRIM)
+        title_lbl.pack(side="left")
+        
+        self.body = ctk.CTkFrame(self, fg_color="transparent")
+        self.body.pack(fill="x", padx=20, pady=(0, 20))
 
 class DriversFrame(ctk.CTkScrollableFrame):
     def __init__(self, parent, switch_tab_callback=None, **kwargs):
@@ -80,43 +96,39 @@ class DriversFrame(ctk.CTkScrollableFrame):
 
     def _build_ui(self):
         # ── Блок 1: Видеокарта и Драйверы NVIDIA ─────────────────────────────
-        gpu_card = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12,
-                                border_width=1, border_color=BORDER)
+        gpu_card = SectionCard(self, "Видеокарта (NVIDIA)", "🎮")
         gpu_card.pack(fill="x", padx=24, pady=(24, 10))
 
-        # Заголовок
-        ctk.CTkLabel(gpu_card, text="🎮  Видеокарта (NVIDIA)",
-                     font=ctk.CTkFont("Segoe UI", 16, "bold"),
-                     text_color=TEXT_PRIM).pack(anchor="w", padx=20, pady=(16, 10))
-
         # Мониторинг
-        self._gpu_info_lbl = ctk.CTkLabel(gpu_card, text="⏳ Получение информации о GPU...",
+        self._gpu_info_lbl = ctk.CTkLabel(gpu_card.body, text="⏳ Получение информации о GPU...",
                                           font=ctk.CTkFont("Segoe UI", 13), text_color=SUCCESS,
                                           justify="left", wraplength=500)
-        self._gpu_info_lbl.pack(anchor="w", padx=20, pady=(0, 16))
+        self._gpu_info_lbl.pack(anchor="w", pady=(0, 16))
 
         # Настройки установки
-        install_frame = ctk.CTkFrame(gpu_card, fg_color="transparent")
-        install_frame.pack(fill="x", padx=20, pady=(0, 10))
+        install_frame = ctk.CTkFrame(gpu_card.body, fg_color="transparent")
+        install_frame.pack(fill="x", pady=(0, 10))
 
         self._install_mode = ctk.StringVar(value="normal")
         
         rb_normal = ctk.CTkRadioButton(install_frame, text="Обычная установка",
                                        variable=self._install_mode, value="normal",
-                                       fg_color=ACCENT, hover_color=ACCENT_HOV)
+                                       fg_color=ACCENT, hover_color=ACCENT_HOV,
+                                       font=ctk.CTkFont("Segoe UI", 12))
         rb_normal.pack(side="left", padx=(0, 20))
 
         rb_clean = ctk.CTkRadioButton(install_frame, text="Чистая установка",
                                       variable=self._install_mode, value="clean",
-                                      fg_color=ACCENT, hover_color=ACCENT_HOV)
+                                      fg_color=ACCENT, hover_color=ACCENT_HOV,
+                                      font=ctk.CTkFont("Segoe UI", 12))
         rb_clean.pack(side="left")
 
         ctk.CTkLabel(install_frame, text="(Рекомендуется, если вы недавно установили Windows)",
                      font=ctk.CTkFont("Segoe UI", 11, slant="italic"), text_color=TEXT_SEC).pack(side="left", padx=10)
 
         # Действия NVIDIA
-        action_frame = ctk.CTkFrame(gpu_card, fg_color="transparent")
-        action_frame.pack(fill="x", padx=20, pady=(10, 20))
+        action_frame = ctk.CTkFrame(gpu_card.body, fg_color="transparent")
+        action_frame.pack(fill="x", pady=(10, 10))
 
         ctk.CTkButton(action_frame, text="Проверить обновления драйвера",
                       font=ctk.CTkFont("Segoe UI", 12, "bold"),
@@ -125,22 +137,17 @@ class DriversFrame(ctk.CTkScrollableFrame):
 
         ctk.CTkButton(action_frame, text="⚙️ Оптимизировать Панель управления",
                       font=ctk.CTkFont("Segoe UI", 12),
-                      fg_color="transparent", hover_color="#1A2A1A",
+                      fg_color="transparent", hover_color="#1F2937",
                       border_width=1, border_color=SUCCESS, text_color=SUCCESS, height=36,
                       command=self._optimize_nvidia).pack(side="left")
 
         # ── Блок 2: Монитор ──────────────────────────────────────────────────
-        mon_card = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12,
-                                border_width=1, border_color=BORDER)
+        mon_card = SectionCard(self, "Монитор", "🖥️")
         mon_card.pack(fill="x", padx=24, pady=(0, 10))
 
-        ctk.CTkLabel(mon_card, text="🖥️  Монитор",
-                     font=ctk.CTkFont("Segoe UI", 16, "bold"),
-                     text_color=TEXT_PRIM).pack(anchor="w", padx=20, pady=(16, 12))
-
         # Элементы управления
-        controls_frame = ctk.CTkFrame(mon_card, fg_color="transparent")
-        controls_frame.pack(fill="x", padx=20, pady=(0, 10))
+        controls_frame = ctk.CTkFrame(mon_card.body, fg_color="transparent")
+        controls_frame.pack(fill="x", pady=(0, 10))
 
         # Гц
         hz_frame = ctk.CTkFrame(controls_frame, fg_color="transparent")
@@ -181,20 +188,15 @@ class DriversFrame(ctk.CTkScrollableFrame):
         mon_card.bind("<Configure>", _resize_mon_desc)
 
         # ── Блок 3: Сетевой адаптер (LAN) ────────────────────────────────────
-        lan_card = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12,
-                                border_width=1, border_color=BORDER)
+        lan_card = SectionCard(self, "Сетевой адаптер (LAN)", "🌐")
         lan_card.pack(fill="x", padx=24, pady=(0, 24))
 
-        ctk.CTkLabel(lan_card, text="🌐  Сетевой адаптер (LAN)",
-                     font=ctk.CTkFont("Segoe UI", 16, "bold"),
-                     text_color=TEXT_PRIM).pack(anchor="w", padx=20, pady=(16, 10))
-
-        self._lan_status_lbl = ctk.CTkLabel(lan_card, text="⏳ Сканирование шины PCI...",
+        self._lan_status_lbl = ctk.CTkLabel(lan_card.body, text="⏳ Сканирование шины PCI...",
                                             font=ctk.CTkFont("Segoe UI", 12), text_color=SUCCESS)
-        self._lan_status_lbl.pack(anchor="w", padx=20, pady=(0, 10))
+        self._lan_status_lbl.pack(anchor="w", pady=(0, 10))
 
-        lan_action_frame = ctk.CTkFrame(lan_card, fg_color="transparent")
-        lan_action_frame.pack(fill="x", padx=20, pady=(0, 20))
+        lan_action_frame = ctk.CTkFrame(lan_card.body, fg_color="transparent")
+        lan_action_frame.pack(fill="x", pady=(0, 20))
 
         self._realtek_btn = ctk.CTkButton(lan_action_frame, text="Скачать драйвер Realtek",
                       font=ctk.CTkFont("Segoe UI", 12),
@@ -242,21 +244,25 @@ class DriversFrame(ctk.CTkScrollableFrame):
 
     def _load_lan_data(self):
         def _worker():
-            import subprocess, json
             try:
-                res = subprocess.run(
-                    ["powershell", "-Command", "Get-WmiObject Win32_NetworkAdapter -Filter 'PhysicalAdapter=True' | Select-Object Manufacturer, ProductName | ConvertTo-Json"],
-                    capture_output=True, timeout=8
-                )
-                output = res.stdout.decode('cp866', errors='ignore').strip()
-                if not output: return
-                adapters = json.loads(output)
-                if isinstance(adapters, dict): adapters = [adapters]
+                import wmi
+                c = wmi.WMI()
+                adapters = []
+                
+                for adapter in c.Win32_NetworkAdapter(PhysicalAdapter=True):
+                    manufacturer = adapter.Manufacturer or ""
+                    product = adapter.ProductName or ""
+                    adapters.append({
+                        "Manufacturer": manufacturer,
+                        "ProductName": product
+                    })
                 
                 has_realtek = any("realtek" in str(a.get("Manufacturer", "")).lower() for a in adapters)
                 has_intel = any("intel" in str(a.get("Manufacturer", "")).lower() for a in adapters)
                 
                 self.after(0, lambda: self._update_lan_ui(has_realtek, has_intel))
+            except ImportError:
+                self.after(0, lambda: self._lan_status_lbl.configure(text="WMI библиотека не доступна", text_color=WARNING))
             except Exception:
                 self.after(0, lambda: self._lan_status_lbl.configure(text="Не удалось определить адаптер", text_color=WARNING))
         threading.Thread(target=_worker, daemon=True).start()

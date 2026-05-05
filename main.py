@@ -6,6 +6,53 @@ main.py — Точка входа. Main GUI на CustomTkinter.
 import customtkinter as ctk
 import sys
 import ctypes
+
+# ── Патч для CTkBaseClass._update_dimensions_event: предотвращает ───────────
+# RecursionError на Python 3.11. CustomTkinter 5.2.2 вызывает _draw синхронно
+# из <Configure>, что при каскаде событий даёт бесконечную рекурсию.
+from customtkinter.windows.widgets.core_widget_classes import ctk_base_class as _ctk_base
+_original_update = _ctk_base.CTkBaseClass._update_dimensions_event
+
+def _safe_update_dimensions_event(self, event):
+    # Проверяем, изменились ли размеры реально
+    current_width = getattr(self, '_last_update_width', None)
+    current_height = getattr(self, '_last_update_height', None)
+    
+    if current_width == event.width and current_height == event.height:
+        return  # Размеры не изменились, пропускаем
+    
+    # Отменяем предыдущий отложенный вызов если есть
+    if hasattr(self, '_update_after_id') and self._update_after_id is not None:
+        try:
+            self.after_cancel(self._update_after_id)
+        except Exception:
+            pass
+        self._update_after_id = None
+    
+    w, h = event.width, event.height
+    
+    def _do_update():
+        self._update_after_id = None
+        # Обновляем сохранённые размеры ПЕРЕД вызовом оригинала
+        self._last_update_width = w
+        self._last_update_height = h
+        try:
+            class _Evt:
+                pass
+            e = _Evt()
+            e.width = w
+            e.height = h
+            return _original_update(self, e)
+        except Exception as e:
+            # При ошибке сбрасываем кэш размеров
+            self._last_update_width = None
+            self._last_update_height = None
+            raise
+    
+    # Используем after(1, ...) вместо after_idle() чтобы избежать немедленного выполнения
+    self._update_after_id = self.after(1, _do_update)
+
+_ctk_base.CTkBaseClass._update_dimensions_event = _safe_update_dimensions_event
 from dashboard import DashboardFrame
 from recommended import RecommendedFrame
 from drivers import DriversFrame
@@ -18,16 +65,9 @@ from system_sync import sync_engine
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-# ── Цветовая схема (дублируется из dashboard для sidebar) ─────────────────
-ACCENT      = "#4F8EF7"
-ACCENT_HOV  = "#3A75E0"
-BG_CARD     = "#1A1A1E"          # Чуть светлее для карточек
-BG_DARK     = "#111114"          # Глубокий темный фон
-BG_SIDEBAR  = "#0D0D0F"          # Почти черный для сайдбара
-TEXT_PRIM   = "#EAEEF8"
-TEXT_SEC    = "#8B9BB4"
-BORDER      = "#28282D"
-NAV_ACTIVE  = "#1E1E24"
+from theme import (
+    ACCENT, BG_DARK, BG_SIDEBAR, TEXT_PRIM, TEXT_SEC, BORDER, NAV_ACTIVE
+)
 
 
 # ── Вкладки (tabs) по категориям ───────────────────────────────────────────
@@ -37,7 +77,7 @@ TABS_CATEGORIES = {
     ],
     "ОПТИМИЗАЦИЯ": [
         ("⚡", "Рекомендуемые", 1),
-        ("🧹", "Очистка", 3),
+        ("🧹", "Очистка и удаление", 3),
     ],
     "СИСТЕМА": [
         ("🎮", "Драйверы", 2),
@@ -82,9 +122,10 @@ class SidebarButton(ctk.CTkFrame):
         self._icon_lbl = ctk.CTkLabel(
             self, text=icon,
             font=ctk.CTkFont("Segoe UI", 18),
-            width=32, text_color=TEXT_PRIM if active else TEXT_SEC
+            width=40, text_color=TEXT_PRIM if active else TEXT_SEC,
+            anchor="center"
         )
-        self._icon_lbl.pack(side="left", padx=(12, 2), pady=10)
+        self._icon_lbl.pack(side="left", padx=(8, 0), pady=10)
 
         # Текст
         self._text_lbl = ctk.CTkLabel(
@@ -93,10 +134,10 @@ class SidebarButton(ctk.CTkFrame):
             text_color=TEXT_PRIM if active else TEXT_SEC,
             anchor="w"
         )
-        self._text_lbl.pack(side="left", fill="x", expand=True, padx=(2, 12))
+        self._text_lbl.pack(side="left", fill="x", expand=True, padx=(10, 12))
 
         # Привязка кликов ко всем дочерним элементам
-        for widget in (self, self._icon_lbl, self._text_lbl, self._stripe):
+        for widget in (self, self._icon_lbl, self._text_lbl):
             widget.bind("<Button-1>", self._on_click)
             widget.bind("<Enter>", self._on_enter)
             widget.bind("<Leave>", self._on_leave)
@@ -128,26 +169,44 @@ class App(ctk.CTk):
 
     def __init__(self):
         super().__init__()
-        self.title("Win11 Optimizer")
-        self.geometry("1100x700")
-        self.minsize(900, 600)
-        self.configure(fg_color=BG_DARK)
-
-        # Иконка окна (если есть)
         try:
-            self.iconbitmap("icon.ico")
-        except Exception:
-            pass
+            self.title("Win11 Optimizer")
+            self.geometry("1100x700")
+            self.minsize(900, 600)
+            self.configure(fg_color=BG_DARK)
 
-        self._current_tab = 0
-        self._tab_frames: list[ctk.CTkFrame | None] = [None] * TOTAL_TABS_COUNT
+            # Иконка окна (если есть)
+            try:
+                self.iconbitmap("icon.ico")
+            except Exception:
+                pass
 
-        # Запуск фоновой синхронизации системных параметров
-        sync_engine.set_dispatcher(self.after)
-        sync_engine.start_monitoring()
+            self._current_tab = 0
+            self._tab_frames: list[ctk.CTkFrame | None] = [None] * TOTAL_TABS_COUNT
+            self._main_loop_started = False
 
-        self._build_layout()
-        self._show_tab(0)
+            self._build_layout()
+            self._show_tab(0)
+            
+            # Schedule sync engine start after main loop is ready
+            self.after(100, self._start_sync_engine)
+            
+        except Exception as e:
+            print(f"Critical error during app initialization: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+    
+    def _start_sync_engine(self):
+        """Start sync engine after main loop is ready."""
+        try:
+            self._main_loop_started = True
+            sync_engine.set_dispatcher(self.after)
+            # Small delay to ensure dispatcher is fully ready
+            self.after(50, sync_engine.start_monitoring)
+        except Exception as e:
+            print(f"Warning: Failed to start sync engine: {e}")
+            # Continue without sync engine
 
     # ── Построение макета ─────────────────────────────────────────────────
 
@@ -203,9 +262,12 @@ class App(ctk.CTk):
             cat_lbl.pack(fill="x", padx=16, pady=(12, 4))
             
             for icon, label, idx in items:
+                # Используем функцию-обертку для фиксации idx в команде
+                def make_command(v=idx): return self._show_tab(v)
+                
                 btn = SidebarButton(
                     nav_container, icon=icon, label=label,
-                    command=lambda i=idx: self._show_tab(i),
+                    command=make_command,
                     active=(idx == 0)
                 )
                 btn.pack(fill="x", pady=1, padx=4)
@@ -232,22 +294,61 @@ class App(ctk.CTk):
 
     def _show_tab(self, index: int):
         """Переключает вкладку по индексу."""
-        if index == self._current_tab and self._tab_frames[index] is not None:
-            return
+        try:
+            if index == self._current_tab and self._tab_frames[index] is not None:
+                return
 
-        # Деактивируем старую кнопку
-        self._nav_buttons[self._current_tab].set_active(False)
+            # Clean up callbacks from previous frame before switching
+            if self._tab_frames[self._current_tab] is not None:
+                old_frame = self._tab_frames[self._current_tab]
+                if hasattr(old_frame, 'cleanup_callbacks'):
+                    try:
+                        old_frame.cleanup_callbacks()
+                    except Exception as e:
+                        print(f"Error cleaning up frame callbacks: {e}")
 
-        self._current_tab = index
-        self._nav_buttons[index].set_active(True)
+            # Деактивируем старую кнопку
+            if self._current_tab in self._nav_buttons:
+                try:
+                    self._nav_buttons[self._current_tab].set_active(False)
+                except Exception as e:
+                    print(f"Error deactivating button: {e}")
 
-        # Создаём фрейм вкладки при первом открытии (lazy init)
-        if self._tab_frames[index] is None:
-            self._tab_frames[index] = self._create_tab_frame(index)
-            self._tab_frames[index].grid(row=0, column=0, sticky="nsew")
+            self._current_tab = index
+            if index in self._nav_buttons:
+                try:
+                    self._nav_buttons[index].set_active(True)
+                except Exception as e:
+                    print(f"Error activating button: {e}")
 
-        # Плавно поднимаем новый фрейм наверх (без артефактов grid_forget)
-        self._tab_frames[index].lift()
+            # Создаём фрейм вкладки при первом открытии (lazy init)
+            if self._tab_frames[index] is None:
+                try:
+                    self._tab_frames[index] = self._create_tab_frame(index)
+                    self._tab_frames[index].grid(row=0, column=0, sticky="nsew")
+                except Exception as e:
+                    print(f"Error creating tab frame {index}: {e}")
+                    # Create placeholder frame on error
+                    self._tab_frames[index] = PlaceholderFrame(self._content_area, f"Tab {index} Error")
+                    self._tab_frames[index].grid(row=0, column=0, sticky="nsew")
+
+            # Плавно поднимаем новый фрейм наверх (без артефактов grid_forget)
+            if self._tab_frames[index]:
+                try:
+                    self._tab_frames[index].lift()
+                except Exception as e:
+                    print(f"Error lifting frame: {e}")
+            
+            # Вызываем хук обновления данных, если он есть
+            if self._tab_frames[index] and hasattr(self._tab_frames[index], "on_show"):
+                try:
+                    self._tab_frames[index].on_show()
+                except Exception as e:
+                    print(f"Error in on_show hook: {e}")
+        except Exception as e:
+            print(f"Critical error in _show_tab: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _create_tab_frame(self, index: int) -> ctk.CTkFrame:
         """Фабрика вкладок — создаёт нужный фрейм по индексу."""
@@ -280,10 +381,24 @@ def is_admin():
 # ── Запуск ─────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if not is_admin():
-        # Перезапуск с правами администратора
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
-        sys.exit()
+    try:
+        if not is_admin():
+            # Перезапуск с правами администратора
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+            sys.exit()
 
-    app = App()
-    app.mainloop()
+        app = App()
+        try:
+            app.mainloop()
+        finally:
+            # Cleanup all callbacks when app closes
+            from system_sync import sync_engine
+            sync_engine.unregister_all()
+    except Exception as e:
+        import traceback
+        print("=" * 60)
+        print("ОШИБКА ПРИ ЗАПУСКЕ ПРИЛОЖЕНИЯ:")
+        print("=" * 60)
+        print(traceback.format_exc())
+        print("=" * 60)
+        input("\nНажмите Enter для закрытия...")

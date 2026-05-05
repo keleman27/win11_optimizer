@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import threading
 from datetime import datetime
+from system_sync import sync_engine
+from tweaks import apply_wifi_adapter, apply_bluetooth_service
 
 ACCENT      = "#4F8EF7"
 ACCENT_HOV  = "#3A75E0"
@@ -52,6 +54,66 @@ class TweakRow(ctk.CTkFrame):
     def set(self, val): self._var.set(val)
 
 
+class ComponentRow(ctk.CTkFrame):
+    """Строка компонента с кнопкой Включить слева от тумблера."""
+    def __init__(self, parent, icon: str, title: str, description: str = "", default: bool = False, on_enable_callback=None, **kw):
+        super().__init__(parent, fg_color="transparent", **kw)
+        self._var = ctk.BooleanVar(value=default)
+        self._on_enable_callback = on_enable_callback
+        
+        # Левая часть: Иконка
+        self._icon_lbl = ctk.CTkLabel(self, text=icon, font=ctk.CTkFont("Segoe UI", 16), text_color=ACCENT, width=30)
+        self._icon_lbl.pack(side="left", padx=(0, 15))
+        
+        # Центр: Текст
+        self._text_container = ctk.CTkFrame(self, fg_color="transparent")
+        self._text_container.pack(side="left", fill="both", expand=True)
+        
+        self._title_lbl = ctk.CTkLabel(self._text_container, text=title, font=ctk.CTkFont("Segoe UI", 13, "bold"), text_color=TEXT_PRIM, anchor="w")
+        self._title_lbl.pack(fill="x")
+        
+        if description:
+            self._desc_lbl = ctk.CTkLabel(self._text_container, text=description, font=ctk.CTkFont("Segoe UI", 11), text_color=TEXT_SEC, anchor="w", justify="left")
+            self._desc_lbl.pack(fill="x")
+        
+        # Правая часть: Кнопка Включить + Переключатель
+        self._controls_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._controls_frame.pack(side="right", padx=(10, 0))
+        
+        # Кнопка Включить
+        self._enable_btn = ctk.CTkButton(
+            self._controls_frame, text="Включить",
+            font=ctk.CTkFont("Segoe UI", 11),
+            fg_color=SUCCESS, hover_color="#45a049",
+            width=70, height=28, corner_radius=6,
+            command=self._on_enable_clicked
+        )
+        self._enable_btn.pack(side="left", padx=(0, 8))
+        
+        # Переключатель
+        self._sw = ctk.CTkSwitch(self._controls_frame, text="", variable=self._var, progress_color=ACCENT, width=45)
+        self._sw.pack(side="left")
+        
+        # Обновляем состояние кнопки при изменении тумблера
+        self._var.trace('w', self._update_enable_button)
+
+    def get(self): return self._var.get()
+    def set(self, val): self._var.set(val)
+    
+    def _on_enable_clicked(self):
+        """Обработчик нажатия на кнопку Включить."""
+        self.set(True)
+        if self._on_enable_callback:
+            self._on_enable_callback()
+    
+    def _update_enable_button(self, *args):
+        """Обновляет состояние кнопки Включить в зависимости от тумблера."""
+        if self.get():
+            self._enable_btn.configure(state="disabled", text="Включено")
+        else:
+            self._enable_btn.configure(state="normal", text="Включить")
+
+
 def add_tooltip(widget, text):
     tooltip = [None]
     def _show(event):
@@ -79,6 +141,7 @@ class CleanupFrame(ctk.CTkScrollableFrame):
                          scrollbar_button_color=BORDER,
                          scrollbar_button_hover_color=ACCENT, **kwargs)
         self._switch_tab = switch_tab_callback
+        self._sync_items = {}  # {key: checkbox}
         self._build_ui()
 
     def _build_ui(self):
@@ -102,7 +165,6 @@ class CleanupFrame(ctk.CTkScrollableFrame):
             ("Camera", "Удаляет стандартное приложение Камера."),
             ("Центр отзывов", "Удаляет Feedback Hub."),
             ("Погода", "Удаляет виджет Погоды."),
-            ("Карты", "Удаляет Windows Maps."),
             ("Связь с телефоном", "Удаляет Phone Link.")
         ]
         self._safe_cbs = []
@@ -117,21 +179,16 @@ class CleanupFrame(ctk.CTkScrollableFrame):
         ctk.CTkLabel(warn_frame, text="⚠️ Осторожно (может повлиять на функции):", font=ctk.CTkFont("Segoe UI", 12, "bold"), text_color=WARNING).pack(anchor="w", pady=(0, 4))
 
         warn_apps = [
-            ("Microsoft 365 (Office)", "Удаление отвяжет интеграцию Office от системы. Устанавливайте только если используете сторонние офисные пакеты."),
-            ("Xbox", "Удаление сломает интеграцию с Xbox Game Bar и Game Pass. Удаляйте, только если вообще не играете в игры от Microsoft."),
-            ("Copilot", "Полное удаление ИИ-помощника от Microsoft. Может затронуть некоторые функции поиска.")
+            ("Microsoft 365 (Office)", "Удаление отвяжет интеграцию Office от системы.", "Устанавливайте только если используете сторонние офисные пакеты."),
+            ("Xbox", "Удаление сломает интеграцию с Xbox Game Bar.", "Удаляйте, только если вообще не играете в игры от Microsoft."),
+            ("Copilot", "Полное удаление ИИ-помощника от Microsoft.", "Может затронуть некоторые функции поиска.")
         ]
         self._warn_cbs = []
-        for app, tooltip_text in warn_apps:
-            row = ctk.CTkFrame(warn_frame, fg_color="transparent")
-            row.pack(fill="x", padx=10)
-            cb = TweakCheckbox(row, app, default=False)
-            cb.pack(side="left")
+        for app, desc, tooltip_text in warn_apps:
+            cb = TweakRow(warn_frame, "⚠️", app, desc, default=False)
+            cb.pack(fill="x", pady=5)
             self._warn_cbs.append(cb)
-
-            help_lbl = ctk.CTkLabel(row, text=" ❔ ", font=ctk.CTkFont("Segoe UI", 13, "bold"), text_color=ACCENT, cursor="hand2")
-            help_lbl.pack(side="left", padx=4)
-            add_tooltip(help_lbl, tooltip_text)
+            add_tooltip(cb._icon_lbl, tooltip_text)
 
         # Компоненты Windows
         comp_frame = ctk.CTkFrame(apps_card, fg_color="transparent")
@@ -139,15 +196,59 @@ class CleanupFrame(ctk.CTkScrollableFrame):
         ctk.CTkLabel(comp_frame, text="⚙️ Компоненты Windows:", font=ctk.CTkFont("Segoe UI", 12, "bold"), text_color=TEXT_PRIM).pack(anchor="w", pady=(0, 4))
         
         comps = [
-            ("Internet Explorer", "Старый браузер (уже не поддерживается)."),
-            ("Windows Hello", "Распознавание лиц и биометрия."),
-            ("Математический ввод", "Панель ввода математических символов.")
+            ("Windows Hello", "Распознавание лиц и биометрия.")
         ]
         self._comp_cbs = []
         for comp, desc in comps:
             cb = TweakRow(comp_frame, "⚙️", comp, desc, default=True)
             cb.pack(fill="x", pady=5)
             self._comp_cbs.append(cb)
+
+        # Apply button for apps removal
+        ctk.CTkButton(apps_card, text="Применить изменения", 
+                      font=ctk.CTkFont("Segoe UI", 12, "bold"),
+                      fg_color=ACCENT, hover_color=ACCENT_HOV, height=36, 
+                      command=self._apply_apps_removal).pack(fill="x", padx=20, pady=(0, 20))
+
+        
+        # ── Блок 1.5: Wi-Fi и Bluetooth ────────────────────────────────────────
+        wifi_bluetooth_card = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12,
+                                         border_width=1, border_color=BORDER)
+        wifi_bluetooth_card.pack(fill="x", padx=24, pady=(0, 10))
+
+        ctk.CTkLabel(wifi_bluetooth_card, text="📡  Wi-Fi и Bluetooth",
+                     font=ctk.CTkFont("Segoe UI", 16, "bold"), text_color=TEXT_PRIM).pack(anchor="w", padx=20, pady=(16, 4))
+        
+        ctk.CTkLabel(wifi_bluetooth_card, text="Управление беспроводными подключениями и адаптерами.",
+                     font=ctk.CTkFont("Segoe UI", 12), text_color=TEXT_SEC).pack(anchor="w", padx=20, pady=(0, 16))
+
+        # Wi-Fi и Bluetooth компоненты
+        wifi_bluetooth_frame = ctk.CTkFrame(wifi_bluetooth_card, fg_color="transparent")
+        wifi_bluetooth_frame.pack(fill="x", padx=20, pady=(0, 20))
+        
+        self._wifi_bluetooth_cbs = []
+        
+        # Wi-Fi адаптер
+        wifi_cb = TweakRow(wifi_bluetooth_frame, "📶", "Wi-Fi адаптер", 
+                          "Отключение беспроводного сетевого адаптера.", default=True)
+        wifi_cb.pack(fill="x", pady=5)
+        self._wifi_bluetooth_cbs.append(wifi_cb)
+        self._sync_items["wifi_enabled"] = wifi_cb
+        sync_engine.register("wifi_enabled", self._create_sync_wrapper(wifi_cb))
+        
+        # Bluetooth сервис
+        bluetooth_cb = TweakRow(wifi_bluetooth_frame, "📻", "Bluetooth сервис", 
+                               "Отключение службы Bluetooth.", default=True)
+        bluetooth_cb.pack(fill="x", pady=5)
+        self._wifi_bluetooth_cbs.append(bluetooth_cb)
+        self._sync_items["bluetooth_enabled"] = bluetooth_cb
+        sync_engine.register("bluetooth_enabled", self._create_sync_wrapper(bluetooth_cb))
+
+        # Apply button for Wi-Fi and Bluetooth
+        ctk.CTkButton(wifi_bluetooth_frame, text="Применить изменения", 
+                      font=ctk.CTkFont("Segoe UI", 12, "bold"),
+                      fg_color=ACCENT, hover_color=ACCENT_HOV, height=36, 
+                      command=self._apply_wifi_bluetooth).pack(fill="x", pady=(10, 0))
 
         # ── Блок 2: Менеджер автозагрузки ────────────────────────────────────
         autorun_card = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=12, border_width=1, border_color=BORDER)
@@ -209,7 +310,7 @@ class CleanupFrame(ctk.CTkScrollableFrame):
         self._log_box.configure(state="disabled")
 
         # Блокировка прокрутки родительского фрейма при наведении на лог
-        self._log_box.bind("<MouseWheel>", self._on_log_scroll)
+        self._bind_scroll_recursive(self._log_box, self._on_log_scroll)
 
     def _on_log_scroll(self, event):
         """Обработка прокрутки внутри лог-бокса без прокрутки всей вкладки."""
@@ -220,6 +321,12 @@ class CleanupFrame(ctk.CTkScrollableFrame):
         """Прокрутка списка автозагрузки без движения всей страницы."""
         self._autorun_list._parent_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
+
+    def _bind_scroll_recursive(self, widget, handler):
+        """Рекурсивно привязывает прокрутку ко всем дочерним элементам."""
+        widget.bind("<MouseWheel>", handler)
+        for child in widget.winfo_children():
+            self._bind_scroll_recursive(child, handler)
 
     def _log(self, text: str, level: str = "INFO"):
         """Потокобезопасное добавление записи в лог-бокс."""
@@ -287,6 +394,9 @@ class CleanupFrame(ctk.CTkScrollableFrame):
                 sw.configure(state="disabled")
             else:
                 self._autorun_switches.append(sw)
+        
+        # Применяем изолированную прокрутку ко всем созданным элементам
+        self._bind_scroll_recursive(self._autorun_list, self._on_autorun_scroll)
 
     def _disable_third_party_autorun(self):
         for sw in self._autorun_switches:
@@ -335,14 +445,15 @@ class CleanupFrame(ctk.CTkScrollableFrame):
     def _clean_update_cache(self):
         self._log("Очистка кэша обновлений Windows...", "WAIT")
         try:
+            from tweaks import CREATE_NO_WINDOW
             self._log("Остановка службы wuauserv...")
-            subprocess.run(["net", "stop", "wuauserv"], capture_output=True, check=False)
+            subprocess.run(["net", "stop", "wuauserv"], capture_output=True, check=False, creationflags=CREATE_NO_WINDOW)
             path = os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), 'SoftwareDistribution\\Download')
             if os.path.exists(path):
                 self._log(f"Удаление загрузок: {path}")
                 self._delete_folder_contents(path)
             self._log("Запуск службы wuauserv...")
-            subprocess.run(["net", "start", "wuauserv"], capture_output=True, check=False)
+            subprocess.run(["net", "start", "wuauserv"], capture_output=True, check=False, creationflags=CREATE_NO_WINDOW)
             self._log("Кэш обновлений очищен.", "DONE")
         except Exception as e:
             self._log(f"Ошибка при очистке кэша обновлений: {e}", "ERROR")
@@ -364,8 +475,114 @@ class CleanupFrame(ctk.CTkScrollableFrame):
             try:
                 if os.path.isfile(file_path) or os.path.islink(file_path):
                     os.unlink(file_path)
-                elif os.path.is_dir(file_path):
+                elif os.path.isdir(file_path):
                     shutil.rmtree(file_path)
             except Exception as e:
                 # Файлы в использовании — нормальное явление для Temp
                 pass
+
+    def _create_sync_wrapper(self, cb):
+        """Создает обертку для sync_engine callback, обновляющую состояние переключателя."""
+        def wrapper(value):
+            try:
+                # Check if widget still exists before updating
+                if hasattr(cb, 'winfo_exists') and not cb.winfo_exists():
+                    return
+                # Обновляем переключатель
+                cb.set(value)
+            except Exception:
+                pass  # Silently ignore errors from destroyed widgets
+        return wrapper
+
+    def _apply_apps_removal(self):
+        """Применяет изменения для удаления встроенных приложений."""
+        threading.Thread(target=self._apply_apps_removal_worker, daemon=True).start()
+
+    def _apply_apps_removal_worker(self):
+        """Работник для применения удаления приложений в фоновом потоке."""
+        try:
+            # Получаем выбранные приложения для удаления
+            selected_apps = []
+            
+            # Безопасные приложения
+            for i, cb in enumerate(self._safe_cbs):
+                if cb.get():
+                    app_names = ["Camera", "Центр отзывов", "Погода", "Связь с телефоном"]
+                    if i < len(app_names):
+                        selected_apps.append(app_names[i])
+            
+            # Осторожные приложения
+            for i, cb in enumerate(self._warn_cbs):
+                if cb.get():
+                    app_names = ["Microsoft 365 (Office)", "Xbox", "Copilot"]
+                    if i < len(app_names):
+                        selected_apps.append(app_names[i])
+            
+            if selected_apps:
+                self._log(f"Выбранные приложения для удаления: {', '.join(selected_apps)}")
+                # Здесь можно добавить логику удаления приложений
+                self._log("Удаление приложений пока не реализовано.", "INFO")
+            else:
+                self._log("Нет выбранных приложений для удаления.", "INFO")
+            
+            self._log("Операция удаления приложений завершена.", "SUCCESS")
+        except Exception as e:
+            self._log(f"Ошибка при удалении приложений: {e}", "ERROR")
+
+    def _apply_wifi_bluetooth(self):
+        """Применяет изменения для Wi-Fi и Bluetooth компонентов."""
+        threading.Thread(target=self._apply_wifi_bluetooth_worker, daemon=True).start()
+
+    def _apply_wifi_bluetooth_worker(self):
+        """Работник для применения изменений Wi-Fi и Bluetooth в фоновом потоке."""
+        try:
+            # Применяем изменения Wi-Fi
+            wifi_cb = self._wifi_bluetooth_cbs[0] if len(self._wifi_bluetooth_cbs) > 0 else None
+            if wifi_cb:
+                wifi_enabled = wifi_cb.get()
+                self._log(f"{'Включение' if wifi_enabled else 'Отключение'} Wi-Fi адаптера...", "SYSTEM")
+                apply_wifi_adapter(wifi_enabled)
+                self._log("Wi-Fi адаптер: " + ("включен" if wifi_enabled else "отключен"), "DONE")
+            
+            # Применяем изменения Bluetooth
+            bluetooth_cb = self._wifi_bluetooth_cbs[1] if len(self._wifi_bluetooth_cbs) > 1 else None
+            if bluetooth_cb:
+                bluetooth_enabled = bluetooth_cb.get()
+                self._log(f"{'Включение' if bluetooth_enabled else 'Отключение'} службы Bluetooth...", "SYSTEM")
+                apply_bluetooth_service(bluetooth_enabled)
+                self._log("Служба Bluetooth: " + ("включена" if bluetooth_enabled else "отключена"), "DONE")
+            
+            self._log("Изменения Wi-Fi и Bluetooth успешно применены.", "SUCCESS")
+        except Exception as e:
+            self._log(f"Ошибка при применении изменений: {e}", "ERROR")
+
+    def _apply_components(self):
+        """Применяет изменения для компонентов Windows (Wi-Fi и Bluetooth)."""
+        threading.Thread(target=self._apply_components_worker, daemon=True).start()
+
+    def _apply_single_component(self, component_type):
+        """Применяет изменения для отдельного компонента при нажатии на кнопку Включить."""
+        threading.Thread(target=self._apply_single_component_worker, args=(component_type,), daemon=True).start()
+
+    def _apply_single_component_worker(self, component_type):
+        """Работник для применения изменений отдельного компонента."""
+        try:
+            if component_type == "wifi":
+                self._log("Включение Wi-Fi адаптера...", "SYSTEM")
+                apply_wifi_adapter(True)
+                self._log("Wi-Fi адаптер: включен", "DONE")
+            elif component_type == "bluetooth":
+                self._log("Включение службы Bluetooth...", "SYSTEM")
+                apply_bluetooth_service(True)
+                self._log("Служба Bluetooth: включена", "DONE")
+        except Exception as e:
+            self._log(f"Ошибка при включении компонента: {e}", "ERROR")
+
+    def _apply_components_worker(self):
+        """Работник для применения изменений компонентов в фоновом потоке."""
+        try:
+            # Обработка только системных компонентов (Windows Hello)
+            # Wi-Fi и Bluetooth теперь обрабатываются в отдельном методе _apply_wifi_bluetooth_worker
+            self._log("Изменения системных компонентов применены.", "SUCCESS")
+        except Exception as e:
+            self._log(f"Ошибка при применении изменений: {e}", "ERROR")
