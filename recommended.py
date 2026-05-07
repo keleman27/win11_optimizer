@@ -6,14 +6,13 @@ import customtkinter as ctk
 import threading
 from tweaks import (
     VISUAL_EFFECTS, apply_visual_effects, apply_power_plan,
-    apply_copilot_disable, apply_explorer_settings,
-    get_visual_effects_state, is_copilot_disabled,
+    apply_explorer_settings,
+    get_visual_effects_state,
     get_current_power_scheme_guid, set_power_scheme,
     is_recommended_power_plan_active,
     POWER_BALANCED, POWER_HIGH, POWER_ULTIMATE,
     apply_dark_mode, get_dark_mode_state,
     get_game_mode_state, apply_game_mode,
-    is_m365_copilot_blocked,
     is_launch_to_this_pc, is_recycle_bin_in_nav,
     is_recycle_bin_hidden_on_desktop, is_end_task_enabled,
     is_end_task_supported,
@@ -293,17 +292,6 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
             pwr_card.body, sleep_label, default=get_sleep_disabled_state(), command=self._on_checkbox_toggle)
         self._sleep_cb.pack(anchor="w")
 
-        self._copilot_cb = TweakCheckbox(
-            pwr_card.body, "Отключить кнопку Copilot на панели задач",
-            default=is_copilot_disabled(), command=self._on_checkbox_toggle)
-        self._copilot_cb.pack(anchor="w")
-
-        # M365 Copilot functionality removed
-        # self._m365_copilot_cb = TweakCheckbox(
-        #     pwr_card.body, "Заблокировать Microsoft 365 Copilot",
-        #     default=is_m365_copilot_blocked(), command=self._on_checkbox_toggle)
-        # self._m365_copilot_cb.pack(anchor="w")
-
         # ── Блок: Текущее состояние системы (Audit) ──────────────────────
         audit_card = SectionCard(self, "Аудит и Состояние системы", "🔍", expanded=True)
         audit_card.pack(fill="x", padx=24, pady=(0, 10))
@@ -434,7 +422,7 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
         self._initial_state = {}
         for cb in self._fx_checkboxes:
             self._initial_state[cb] = cb.get()
-        for cb in (self._pwr_cb, self._copilot_cb, self._sleep_cb,
+        for cb in (self._pwr_cb, self._sleep_cb,
                    self._launch_cb, self._recycle_nav_cb, self._hide_recycle_cb, self._kill_task_cb,
                    self._dark_mode_cb, self._game_mode_cb):
             self._initial_state[cb] = cb.get()
@@ -512,12 +500,6 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
         self._pwr_cb.set(True)
         self._sleep_cb.set(not is_laptop)
 
-        # Copilot — отключить (рекомендуется)
-        self._copilot_cb.set(True)
-
-        # Microsoft 365 Copilot — заблокировать (рекомендуется)
-        # self._m365_copilot_cb.set(True)
-
         # Game Mode — включить (рекомендуется)
         self._game_mode_cb.set(True)
 
@@ -585,15 +567,6 @@ class RecommendedFrame(ctk.CTkScrollableFrame):
             # Game Mode (НЕ требует перезапуск)
             if self._game_mode_cb.get() != self._initial_state[self._game_mode_cb]:
                 apply_game_mode(self._game_mode_cb.get())
-
-            # 4. Copilot (Требует перезапуск explorer.exe)
-            if self._copilot_cb.get() != self._initial_state[self._copilot_cb]:
-                apply_copilot_disable(self._copilot_cb.get())
-                # Перезапускаем explorer.exe для немедленного применения изменений
-                restart_explorer()
-                needs_restart = False  # explorer.exe перезапущен, полная перезагрузка не нужна
-
-            # 4.1. Microsoft 365 Copilot functionality removed
 
             # 5. Проводник (Требует перезапуск)
             exp_tweaks = [self._launch_cb, self._recycle_nav_cb, self._hide_recycle_cb, self._kill_task_cb]

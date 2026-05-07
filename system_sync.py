@@ -9,7 +9,7 @@ import winreg
 import subprocess
 import struct
 from tweaks import (
-    run_cmd_bytes, is_copilot_disabled,
+    run_cmd_bytes,
     is_launch_to_this_pc, is_recycle_bin_in_nav,
     is_recycle_bin_hidden_on_desktop, is_end_task_enabled,
 )
@@ -220,10 +220,7 @@ class SystemSync:
         states["hags"] = self._read_reg(winreg.HKEY_LOCAL_MACHINE, 
                                         r"SYSTEM\CurrentControlSet\Control\GraphicsDrivers", 
                                         "HwSchMode") == 2
-        # 4. Copilot (полная проверка всех ключей)
-        states["copilot_disabled"] = is_copilot_disabled()
-        
-        # 5. Explorer defaults
+        # 4. Explorer defaults
         states["explorer_launch_this_pc"] = is_launch_to_this_pc()
         states["recycle_in_nav"] = is_recycle_bin_in_nav()
         states["recycle_hidden_desktop"] = is_recycle_bin_hidden_on_desktop()

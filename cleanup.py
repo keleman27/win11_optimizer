@@ -180,8 +180,7 @@ class CleanupFrame(ctk.CTkScrollableFrame):
 
         warn_apps = [
             ("Microsoft 365 (Office)", "Удаление отвяжет интеграцию Office от системы.", "Устанавливайте только если используете сторонние офисные пакеты."),
-            ("Xbox", "Удаление сломает интеграцию с Xbox Game Bar.", "Удаляйте, только если вообще не играете в игры от Microsoft."),
-            ("Copilot", "Полное удаление ИИ-помощника от Microsoft.", "Может затронуть некоторые функции поиска.")
+            ("Xbox", "Удаление сломает интеграцию с Xbox Game Bar.", "Удаляйте, только если вообще не играете в игры от Microsoft.")
         ]
         self._warn_cbs = []
         for app, desc, tooltip_text in warn_apps:
@@ -514,7 +513,7 @@ class CleanupFrame(ctk.CTkScrollableFrame):
             # Осторожные приложения
             for i, cb in enumerate(self._warn_cbs):
                 if cb.get():
-                    app_names = ["Microsoft 365 (Office)", "Xbox", "Copilot"]
+                    app_names = ["Microsoft 365 (Office)", "Xbox"]
                     if i < len(app_names):
                         selected_apps.append(app_names[i])
             

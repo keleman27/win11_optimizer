@@ -434,371 +434,6 @@ def set_power_scheme(guid: str):
 
 
 
-def apply_copilot_disable(disable: bool = True):
-    """Полностью отключает или включает Copilot (кнопка, функционал и автозапуск)."""
-    # 1. Визуальная часть панели задач
-    adv_key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-    _set_reg(winreg.HKEY_CURRENT_USER, adv_key, "ShowCopilotButton", 0 if disable else 1, "DWORD")
-    _set_reg(winreg.HKEY_CURRENT_USER, adv_key, "AllowCopilot", 0 if disable else 1, "DWORD")
-    _set_reg(winreg.HKEY_CURRENT_USER, adv_key, "ConfigureCopilot", 0 if disable else 1, "DWORD")
-
-    # 2. Политики (пользователь + система)
-    _set_reg(winreg.HKEY_CURRENT_USER,
-             r"Software\Policies\Microsoft\Windows\WindowsCopilot",
-             "TurnOffWindowsCopilot", 1 if disable else 0, "DWORD")
-    _set_reg(winreg.HKEY_LOCAL_MACHINE,
-             r"SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot",
-             "TurnOffWindowsCopilot", 1 if disable else 0, "DWORD")
-    _set_reg(winreg.HKEY_LOCAL_MACHINE,
-             r"SOFTWARE\Policies\Microsoft\Windows\Explorer",
-             "DisableCopilot", 1 if disable else 0, "DWORD")
-
-    # 3. Автозапуск и живые процессы
-    prevent_copilot_autostart(disable)
-    if disable:
-        kill_copilot_processes()
-
-
-def is_copilot_disabled() -> bool:
-    """Проверяет, полностью ли отключен Copilot (кнопка и функционал)."""
-    try:
-        adv_key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-
-        # Проверяем основную кнопку и визуальные ограничения
-        try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, adv_key, 0, winreg.KEY_READ)
-            show_button, _ = winreg.QueryValueEx(key, "ShowCopilotButton")
-            allow_copilot, _ = winreg.QueryValueEx(key, "AllowCopilot")
-            configure_copilot, _ = winreg.QueryValueEx(key, "ConfigureCopilot")
-            winreg.CloseKey(key)
-            button_hidden = show_button == 0
-            allow_blocked = allow_copilot == 0
-            configure_blocked = configure_copilot == 0
-        except Exception:
-            button_hidden = False
-            allow_blocked = False
-            configure_blocked = False
-        
-        # Проверяем политику для текущего пользователя
-        try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                 r"Software\Policies\Microsoft\Windows\WindowsCopilot",
-                                 0, winreg.KEY_READ)
-            turn_off, _ = winreg.QueryValueEx(key, "TurnOffWindowsCopilot")
-            winreg.CloseKey(key)
-            policy_user = turn_off == 1
-        except Exception:
-            policy_user = False
-        
-        # Проверяем политику для всех пользователей
-        try:
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                                 r"SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot",
-                                 0, winreg.KEY_READ)
-            turn_off, _ = winreg.QueryValueEx(key, "TurnOffWindowsCopilot")
-            winreg.CloseKey(key)
-            policy_system = turn_off == 1
-        except Exception:
-            policy_system = False
-
-        # Политика Explorer (скрывает и отключает Copilot системно)
-        try:
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                                 r"SOFTWARE\Policies\Microsoft\Windows\Explorer",
-                                 0, winreg.KEY_READ)
-            disable_copilot, _ = winreg.QueryValueEx(key, "DisableCopilot")
-            winreg.CloseKey(key)
-            explorer_policy = disable_copilot == 1
-        except Exception:
-            explorer_policy = False
-        
-        # Copilot считается отключенным, если кнопка скрыта И активна хотя бы одна блокировка функционала
-        return button_hidden and (
-            policy_user or policy_system or explorer_policy or (allow_blocked and configure_blocked)
-        )
-        
-    except Exception:
-        return False
-
-
-
-
-def kill_copilot_processes():
-    """Завершает все процессы связанные с Copilot."""
-    try:
-        import psutil
-        # Ищем процессы Copilot
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                proc_name = proc.info['name'].lower()
-                if 'copilot' in proc_name:
-                    proc.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-    except Exception:
-        pass
-
-
-def prevent_copilot_autostart(prevent: bool = True):
-    """Предотвращает или разрешает автозапуск Copilot через реестр."""
-    if prevent:
-        # Блокируем автозапуск через Run ключи
-        run_keys = [
-            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run"),
-            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run"),
-            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
-            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
-        ]
-        
-        for root, key_path in run_keys:
-            try:
-                key = winreg.OpenKey(root, key_path, 0, winreg.KEY_READ)
-                # Получаем все значения в ключе
-                values = {}
-                try:
-                    i = 0
-                    while True:
-                        name, value, reg_type = winreg.EnumValue(key, i)
-                        values[name] = value
-                        i += 1
-                except WindowsError:
-                    pass
-                winreg.CloseKey(key)
-                
-                # Ищем и удаляем Copilot записи
-                for value_name in values:
-                    if any(copilot_name in value_name.lower() for copilot_name in 
-                          ['copilot', 'microsoft.copilot', 'ms365copilot']):
-                        try:
-                            del_key = winreg.OpenKey(root, key_path, 0, winreg.KEY_SET_VALUE)
-                            winreg.DeleteValue(del_key, value_name)
-                            winreg.CloseKey(del_key)
-                        except Exception:
-                            pass
-                            
-            except Exception:
-                pass
-        
-        # Блокируем автозапуск через политики (если есть права)
-        try:
-            _set_reg(winreg.HKEY_CURRENT_USER,
-                     r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer",
-                     "DisableCopilotStartup", 1 if prevent else 0, "DWORD")
-        except PermissionError:
-            pass  # Игнорируем ошибку прав доступа
-        
-        # Очищаем папку автозагрузки
-        cleanup_copilot_startup_folder()
-        
-    else:
-        # Разрешаем автозапуск
-        try:
-            _set_reg(winreg.HKEY_CURRENT_USER,
-                     r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer",
-                     "DisableCopilotStartup", 0, "DWORD")
-        except PermissionError:
-            pass  # Игнорируем ошибку прав доступа
-
-
-def cleanup_copilot_startup_folder():
-    """Очищает папки автозагрузки от Copilot ярлыков."""
-    import os
-    
-    startup_folders = [
-        os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"),
-        os.path.expandvars(r"%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs\Startup"),
-    ]
-    
-    for folder in startup_folders:
-        try:
-            if os.path.exists(folder):
-                for file_name in os.listdir(folder):
-                    file_path = os.path.join(folder, file_name)
-                    if os.path.isfile(file_path):
-                        # Проверяем имя файла на наличие Copilot
-                        if any(copilot_name in file_name.lower() for copilot_name in 
-                              ['copilot', 'microsoft.copilot', 'ms365copilot']):
-                            try:
-                                os.remove(file_path)
-                            except Exception:
-                                pass
-        except Exception:
-            pass
-
-
-def test_copilot_functionality() -> bool:
-    """Проверяет функциональную доступность Copilot."""
-    try:
-        # Проверяем URI протоколы и их команды
-        def is_protocol_working(protocol):
-            try:
-                key = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, protocol, 0, winreg.KEY_READ)
-                # Проверяем команду
-                try:
-                    cmd_key = winreg.OpenKey(key, r'shell\open\command', 0, winreg.KEY_READ)
-                    cmd, _ = winreg.QueryValueEx(cmd_key, '')
-                    winreg.CloseKey(cmd_key)
-                    winreg.CloseKey(key)
-                    # Команда работает если она не пустая и не заблокирована
-                    return cmd and not cmd.startswith('rem Blocked')
-                except Exception:
-                    winreg.CloseKey(key)
-                    return False
-            except Exception:
-                return False
-        
-        ms_copilot_working = is_protocol_working("ms-copilot")
-        edge_copilot_working = is_protocol_working("ms-edge-copilot")
-        
-        # Проверяем наличие процессов
-        import psutil
-        copilot_processes = any('copilot' in p.info['name'].lower() 
-                              for p in psutil.process_iter(['pid', 'name']))
-        
-        # Copilot функционально доступен если:
-        # - URI протоколы работают ИЛИ
-        # - Процессы Copilot запущены
-        return (ms_copilot_working or edge_copilot_working or copilot_processes)
-        
-    except Exception:
-        return False
-
-
-def get_game_mode_state() -> bool:
-    """Возвращает текущее состояние Game Mode."""
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
-                           r"Software\Microsoft\GameBar", 
-                           0, winreg.KEY_READ)
-        val1, _ = winreg.QueryValueEx(key, "AllowAutoGameMode")
-        val2, _ = winreg.QueryValueEx(key, "AutoGameModeEnabled")
-        winreg.CloseKey(key)
-        return val1 == 1 and val2 == 1
-    except Exception:
-        return False
-
-
-def apply_game_mode(enable: bool = True):
-    """Включает или выключает Game Mode."""
-    value = 1 if enable else 0
-    _set_reg(winreg.HKEY_CURRENT_USER,
-             r"Software\Microsoft\GameBar",
-             "AllowAutoGameMode", value, "DWORD")
-    _set_reg(winreg.HKEY_CURRENT_USER,
-             r"Software\Microsoft\GameBar",
-             "AutoGameModeEnabled", value, "DWORD")
-    # Уведомляем систему об изменениях
-    _broadcast_setting_change()
-
-
-def get_m365_copilot_status_details() -> dict:
-    """Возвращает детальную информацию о статусе блокировки M365 Copilot."""
-    details = {
-        "policy_blocked": False,
-        "policy_value": None,
-        "explorer_blocked": False,
-        "explorer_value": None,
-        "visual_blocked": False,
-        "show_button": None,
-        "allow_copilot": None,
-        "configure_copilot": None,
-        "uri_protocols_blocked": False,
-        "functional_available": False,
-        "overall_blocked": False
-    }
-    
-    try:
-        # Проверяем основные политики
-        try:
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                                 r"SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot",
-                                 0, winreg.KEY_READ)
-            turn_off, _ = winreg.QueryValueEx(key, "TurnOffWindowsCopilot")
-            winreg.CloseKey(key)
-            details["policy_value"] = turn_off
-            details["policy_blocked"] = turn_off == 1
-        except Exception as e:
-            details["policy_value"] = f"Error: {e}"
-        
-        try:
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                                 r"SOFTWARE\Policies\Microsoft\Windows\Explorer",
-                                 0, winreg.KEY_READ)
-            disable_copilot, _ = winreg.QueryValueEx(key, "DisableCopilot")
-            winreg.CloseKey(key)
-            details["explorer_value"] = disable_copilot
-            details["explorer_blocked"] = disable_copilot == 1
-        except Exception as e:
-            details["explorer_value"] = f"Error: {e}"
-        
-        # Проверяем визуальные настройки
-        try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                 r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-                                 0, winreg.KEY_READ)
-            show_button, _ = winreg.QueryValueEx(key, "ShowCopilotButton")
-            allow_copilot, _ = winreg.QueryValueEx(key, "AllowCopilot")
-            configure_copilot, _ = winreg.QueryValueEx(key, "ConfigureCopilot")
-            winreg.CloseKey(key)
-            
-            details["show_button"] = show_button
-            details["allow_copilot"] = allow_copilot
-            details["configure_copilot"] = configure_copilot
-            details["visual_blocked"] = show_button == 0 and allow_copilot == 0 and configure_copilot == 0
-        except Exception as e:
-            details["show_button"] = f"Error: {e}"
-            details["allow_copilot"] = f"Error: {e}"
-            details["configure_copilot"] = f"Error: {e}"
-        
-        # Проверяем URI протоколы (функционально заблокированы ли они)
-        def is_protocol_functionally_blocked(protocol):
-            try:
-                key = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, protocol, 0, winreg.KEY_READ)
-                try:
-                    cmd_key = winreg.OpenKey(key, r'shell\open\command', 0, winreg.KEY_READ)
-                    cmd, _ = winreg.QueryValueEx(cmd_key, '')
-                    winreg.CloseKey(cmd_key)
-                    winreg.CloseKey(key)
-                    # Протокол заблокирован если команда пустая или начинается с rem Blocked
-                    return not cmd or cmd.startswith('rem Blocked')
-                except Exception:
-                    winreg.CloseKey(key)
-                    return True  # Нет команды = заблокирован
-            except Exception:
-                return True  # Нет протокола = заблокирован
-        
-        ms_copilot_blocked = is_protocol_functionally_blocked("ms-copilot")
-        edge_copilot_blocked = is_protocol_functionally_blocked("ms-edge-copilot")
-        
-        details["uri_protocols_blocked"] = ms_copilot_blocked and edge_copilot_blocked
-        
-        # Проверяем функциональную доступность
-        details["functional_available"] = test_copilot_functionality()
-        
-        # Общий статус - заблокирован только если:
-        # 1. Все реестровые настройки применены И
-        # 2. URI протоколы удалены И  
-        # 3. Функционально недоступен
-        registry_blocked = (details["policy_blocked"] and 
-                           details["explorer_blocked"] and 
-                           details["visual_blocked"])
-        
-        details["overall_blocked"] = (registry_blocked and 
-                                     details["uri_protocols_blocked"] and 
-                                     not details["functional_available"])
-        
-    except Exception as e:
-        details["error"] = str(e)
-    
-    return details
-
-
-def is_m365_copilot_blocked() -> bool:
-    """Проверяет, заблокирован ли Microsoft 365 Copilot."""
-    details = get_m365_copilot_status_details()
-    return details.get("overall_blocked", False)
-
-
 def apply_explorer_settings(open_to_this_pc: bool, recycle_in_nav: bool, 
                             hide_recycle_desktop: bool, enable_end_task: bool):
     """Применяет настройки Проводника."""
@@ -966,6 +601,35 @@ def restart_pc():
     """Перезагружает ПК."""
     subprocess.run(["shutdown", "/r", "/t", "10"], 
                    capture_output=True, creationflags=CREATE_NO_WINDOW)
+
+
+def get_game_mode_state() -> bool:
+    """Проверяет, включён ли Игровой режим (Game Mode)."""
+    try:
+        key1 = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                              r"Software\Microsoft\GameBar", 0, winreg.KEY_READ)
+        val1, _ = winreg.QueryValueEx(key1, "AllowAutoGameMode")
+        winreg.CloseKey(key1)
+        key2 = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                              r"Software\Microsoft\GameBar", 0, winreg.KEY_READ)
+        val2, _ = winreg.QueryValueEx(key2, "AutoGameModeEnabled")
+        winreg.CloseKey(key2)
+        return val1 == 1 and val2 == 1
+    except Exception:
+        return False
+
+
+def apply_game_mode(enabled: bool):
+    """Включает или выключает Игровой режим (Game Mode)."""
+    val = 1 if enabled else 0
+    try:
+        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                               r"Software\Microsoft\GameBar")
+        winreg.SetValueEx(key, "AllowAutoGameMode", 0, winreg.REG_DWORD, val)
+        winreg.SetValueEx(key, "AutoGameModeEnabled", 0, winreg.REG_DWORD, val)
+        winreg.CloseKey(key)
+    except Exception:
+        pass
 
 
 def get_dark_mode_state() -> bool:
